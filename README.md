@@ -4,9 +4,13 @@ un petit programme Android pour Monitorer et Controller l'ESP32 du routeur Solai
 
 
 A compiler sur Android Studio: 
+
   flutter clean
+
   flutter pub get
+  
   flutter build apk --release
+  
   flutter install
 
 ou installer directement le dernier APK
