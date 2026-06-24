@@ -13,4 +13,4 @@ A compiler sur Android Studio:
   
   flutter install
 
-ou installer directement le dernier APK
+
