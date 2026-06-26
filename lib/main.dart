@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Client HTTP natif, plus permissif que le package http ─────────────────────
-Future<String> simpleGet(String url) async {
+Future<String> simpleGet(String url, {String? cookie}) async {
   final client = HttpClient();
   client.connectionTimeout = const Duration(seconds: 8);
   client.badCertificateCallback = (cert, host, port) => true;
@@ -14,6 +14,9 @@ Future<String> simpleGet(String url) async {
     final uri = Uri.parse(url);
     final request = await client.getUrl(uri);
     request.headers.set('Connection', 'close');
+    if (cookie != null && cookie.isNotEmpty) {
+      request.headers.set('Cookie', cookie);
+    }
     final response = await request.close();
     final body = await response.transform(const SystemEncoding().decoder).join();
     return body;
@@ -33,7 +36,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '2.2.0';
+const String appVersion = '2.3.0';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -126,6 +129,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   String _esp32Url = '';
+  String _password = '';
   double? _ce;
   String? _heureEquiv;
   int _forcage = 0;
@@ -150,18 +154,20 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadConfig() async {
     final prefs = await SharedPreferences.getInstance();
     final url = prefs.getString('esp32_url') ?? '';
+    final pwd = prefs.getString('esp32_pwd') ?? '';
     if (url.isNotEmpty) {
-      setState(() => _esp32Url = url);
+      setState(() { _esp32Url = url; _password = pwd; });
       _startPolling();
     } else {
       _showConfig();
     }
   }
 
-  Future<void> _saveConfig(String url) async {
+  Future<void> _saveConfig(String url, String pwd) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('esp32_url', url);
-    setState(() => _esp32Url = url);
+    await prefs.setString('esp32_pwd', pwd);
+    setState(() { _esp32Url = url; _password = pwd; });
     _startPolling();
   }
 
@@ -174,9 +180,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _refresh() async {
     try {
       final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
+      final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
       final results = await Future.wait([
-        simpleGet('$base/ajax_data'),
-        simpleGet('$base/ajax_etatActions?Force=0&NumAction=0'),
+        simpleGet('$base/ajax_data', cookie: cookie),
+        simpleGet('$base/ajax_etatActions?Force=0&NumAction=0', cookie: cookie),
       ]).timeout(const Duration(seconds: 10));
 
       final pw = parsePuissances(results[0]);
@@ -202,7 +209,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _sendForce(int force) async {
     try {
       final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
-      await simpleGet('$base/ajax_etatActions?Force=$force&NumAction=0');
+      final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
+      await simpleGet('$base/ajax_etatActions?Force=$force&NumAction=0', cookie: cookie);
       await _refresh(); // rafraîchit immédiatement après l'action
     } catch (_) {}
   }
@@ -218,9 +226,10 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       builder: (_) => ConfigSheet(
         currentUrl: _esp32Url,
-        onSave: (url) {
+        currentPwd: _password,
+        onSave: (url, pwd) {
           Navigator.pop(context);
-          _saveConfig(url);
+          _saveConfig(url, pwd);
         },
       ),
     );
@@ -700,27 +709,50 @@ class _ForceBtn extends StatelessWidget {
 // ── Feuille de config ──────────────────────────────────────────────────────────
 class ConfigSheet extends StatefulWidget {
   final String currentUrl;
-  final void Function(String) onSave;
-  const ConfigSheet({super.key, required this.currentUrl, required this.onSave});
+  final String currentPwd;
+  final void Function(String url, String pwd) onSave;
+  const ConfigSheet({super.key, required this.currentUrl, required this.currentPwd, required this.onSave});
 
   @override
   State<ConfigSheet> createState() => _ConfigSheetState();
 }
 
 class _ConfigSheetState extends State<ConfigSheet> {
-  late TextEditingController _ctrl;
+  late TextEditingController _urlCtrl;
+  late TextEditingController _pwdCtrl;
 
   @override
   void initState() {
     super.initState();
-    _ctrl = TextEditingController(text: widget.currentUrl);
+    _urlCtrl = TextEditingController(text: widget.currentUrl);
+    _pwdCtrl = TextEditingController(text: widget.currentPwd);
   }
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    _urlCtrl.dispose();
+    _pwdCtrl.dispose();
     super.dispose();
   }
+
+  InputDecoration _inputDeco(String hint) => InputDecoration(
+    hintText: hint,
+    hintStyle: const TextStyle(color: Color(0xFF5A6278)),
+    filled: true,
+    fillColor: const Color(0xFF0A0F1A),
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
+    ),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: const BorderSide(color: Color(0xFFF97316)),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -741,40 +773,37 @@ class _ConfigSheetState extends State<ConfigSheet> {
               style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
           const SizedBox(height: 8),
           TextField(
-            controller: _ctrl,
+            controller: _urlCtrl,
             style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
             keyboardType: TextInputType.url,
             autocorrect: false,
-            decoration: InputDecoration(
-              hintText: 'http://192.168.1.X:PORT',
-              hintStyle: const TextStyle(color: Color(0xFF5A6278)),
-              filled: true,
-              fillColor: const Color(0xFF0A0F1A),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Color(0xFFF97316)),
-              ),
-            ),
+            decoration: _inputDeco('http://192.168.1.X:PORT'),
           ),
           const SizedBox(height: 6),
           const Text('Avec http:// et le port si nécessaire',
+              style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+          const SizedBox(height: 16),
+          const Text('Mot de passe (optionnel)',
+              style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _pwdCtrl,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
+            obscureText: true,
+            autocorrect: false,
+            decoration: _inputDeco('Laisser vide si aucun'),
+          ),
+          const SizedBox(height: 6),
+          const Text('Requis pour le forçage ON/OFF',
               style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
               onPressed: () {
-                var url = _ctrl.text.trim().replaceAll(RegExp(r'/$'), '');
+                var url = _urlCtrl.text.trim().replaceAll(RegExp(r'/$'), '');
                 if (!url.startsWith('http')) url = 'http://$url';
-                widget.onSave(url);
+                widget.onSave(url, _pwdCtrl.text.trim());
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFF97316),
