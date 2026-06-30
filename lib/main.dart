@@ -37,7 +37,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '2.4.0';
+const String appVersion = '2.4.1';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          SizedBox(height: hasCapteurs ? 10 : 20),
+                          SizedBox(height: hasCapteurs ? 2 : 20),
                           if (!hasCapteurs) ...[
                             const Text(
                               'F1ATB MONITOR',
@@ -394,8 +394,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 fontFamily: 'monospace',
                               ),
                             ),
-                          SizedBox(height: hasCapteurs ? 10 : 16),
-                          // Capteurs température (si actifs)
+                          SizedBox(height: hasCapteurs ? 6 : 16),
                           if (hasCapteurs)
                             Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -408,7 +407,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           if (hasCapteurs) const SizedBox(height: 10),
                           // Cards puissance
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
                             child: Row(
                               children: [
                                 Expanded(child: PowerCard(
@@ -428,7 +427,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           SizedBox(height: hasCapteurs ? 12 : 18),
                           // Widget forçage
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
                             child: ForceWidget(
                               forcage: _forcage,
                               onForce: _sendForce,
