@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -36,7 +37,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '2.3.0';
+const String appVersion = '2.4.0';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -49,6 +50,46 @@ Map<String, double> parsePuissances(String body) {
     'pwi': g1.length > 1 ? (double.tryParse(g1[1].trim()) ?? 0) : 0,
   };
 }
+
+// ── Parsing des températures (G0[5] de /ajax_data) ────────────────────────────
+// Format: "2.02|1.96|1.96|1.98|" — capteur absent = -127.00
+List<double?> parseTemperatures(String body) {
+  final groupes = body.split(GS);
+  if (groupes.isEmpty) return [null, null, null, null];
+  final g0 = groupes[0].split(RS);
+  if (g0.length < 6) return [null, null, null, null];
+
+  final raw = g0[5].trim(); // "2.02|1.96|1.96|1.98|"
+  final parts = raw.split('|').where((s) => s.isNotEmpty).toList();
+
+  return List.generate(4, (i) {
+    if (i >= parts.length) return null;
+    final v = double.tryParse(parts[i].trim());
+    if (v == null || v <= -100) return null; // -127.00 = capteur absent
+    return v;
+  });
+}
+
+// ── Parsing des noms/activation capteurs (JSON /ParaFixe) ────────────────────
+class CapteurInfo {
+  final String nom;
+  final bool actif;
+  const CapteurInfo({required this.nom, required this.actif});
+}
+
+List<CapteurInfo> parseCapteursInfo(String jsonBody) {
+  try {
+    final data = jsonDecode(jsonBody) as Map<String, dynamic>;
+    return List.generate(4, (i) {
+      final nom = (data['nomTemperature$i'] ?? 'Capteur ${i + 1}').toString();
+      final source = (data['Source_Temp$i'] ?? 'tempNo').toString();
+      return CapteurInfo(nom: nom, actif: source != 'tempNo');
+    });
+  } catch (_) {
+    return List.generate(4, (i) => const CapteurInfo(nom: '', actif: false));
+  }
+}
+
 
 // ── Parsing /ajax_etatActions ─────────────────────────────────────────────────
 // ── Conversion équivalence ouverture → HH:MM ─────────────────────────────────
@@ -133,6 +174,8 @@ class _HomeScreenState extends State<HomeScreen> {
   double? _ce;
   String? _heureEquiv;
   int _forcage = 0;
+  List<CapteurInfo> _capteursInfo = List.generate(4, (i) => const CapteurInfo(nom: '', actif: false));
+  List<double?> _temperatures = [null, null, null, null];
   double _pws = 0;
   double _pwi = 0;
   bool _ok = false;
@@ -173,8 +216,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startPolling() {
     _timer?.cancel();
+    _fetchCapteursInfo(); // une seule fois, infos statiques
     _refresh();
     _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refresh());
+  }
+
+  Future<void> _fetchCapteursInfo() async {
+    try {
+      final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
+      final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
+      final body = await simpleGet('$base/ParaFixe', cookie: cookie)
+          .timeout(const Duration(seconds: 8));
+      final infos = parseCapteursInfo(body);
+      if (mounted) setState(() => _capteursInfo = infos);
+    } catch (_) {
+      // pas bloquant : sans ces infos, les capteurs ne s'affichent simplement pas
+    }
   }
 
   Future<void> _refresh() async {
@@ -188,6 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final pw = parsePuissances(results[0]);
       final action = parseActionneur(results[1]);
+      final temps = parseTemperatures(results[0]);
 
       setState(() {
         _pws = pw['pws']!;
@@ -195,6 +253,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _ce = action.ouverture;
         _heureEquiv = action.heureEquiv;
         _forcage = action.forcage;
+        _temperatures = temps;
         _ok = true;
         _statusTxt = 'màj ${TimeOfDay.now().format(context)}';
       });
@@ -237,22 +296,62 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final capteursActifs = <int>[];
+    for (var i = 0; i < 4; i++) {
+      if (_capteursInfo[i].actif && _temperatures[i] != null) {
+        capteursActifs.add(i);
+      }
+    }
+    final hasCapteurs = capteursActifs.isNotEmpty;
+    final imageHeight = hasCapteurs ? 100.0 : 150.0;
+
     return Scaffold(
       body: Stack(
         children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Bandeau image entière en haut, sous la barre de statut
+              // Bandeau image en haut, sous la barre de statut
               SafeArea(
                 bottom: false,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-                  child: ClipRRect(
+                  child: hasCapteurs
+                  // Layout compact : image à gauche + texte centré à droite
+                      ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
+                        child: SizedBox(
+                          width: imageHeight,
+                          height: imageHeight,
+                          child: Image.asset(
+                            'assets/icon.png',
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      const Expanded(
+                        child: Text(
+                          'F1ATB MONITOR',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 2.0,
+                            color: Color(0xFF5A6278),
+                          ),
+                        ),
+                      ),
+                    ],
+                  )
+                  // Layout standard : image pleine largeur
+                      : ClipRRect(
                     borderRadius: BorderRadius.circular(24),
                     child: SizedBox(
                       width: double.infinity,
-                      height: 150,
+                      height: imageHeight,
                       child: Image.asset(
                         'assets/icon.png',
                         fit: BoxFit.contain,
@@ -269,20 +368,22 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const SizedBox(height: 20),
-                          const Text(
-                            'F1ATB MONITOR',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 2.5,
-                              color: Color(0xFF5A6278),
+                          SizedBox(height: hasCapteurs ? 10 : 20),
+                          if (!hasCapteurs) ...[
+                            const Text(
+                              'F1ATB MONITOR',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 2.5,
+                                color: Color(0xFF5A6278),
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 24),
+                            const SizedBox(height: 24),
+                          ],
                           // Jauge circulaire
                           GaugeWidget(value: _ce ?? 0, hasValue: _ce != null),
-                          const SizedBox(height: 8),
+                          SizedBox(height: hasCapteurs ? 2 : 8),
                           // Équivalence heure (ex: 0:08 = 8 min à 100%)
                           if (_heureEquiv != null)
                             Text(
@@ -293,7 +394,18 @@ class _HomeScreenState extends State<HomeScreen> {
                                 fontFamily: 'monospace',
                               ),
                             ),
-                          const SizedBox(height: 16),
+                          SizedBox(height: hasCapteurs ? 10 : 16),
+                          // Capteurs température (si actifs)
+                          if (hasCapteurs)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 24),
+                              child: CapteursRow(
+                                indices: capteursActifs,
+                                infos: _capteursInfo,
+                                temperatures: _temperatures,
+                              ),
+                            ),
+                          if (hasCapteurs) const SizedBox(height: 10),
                           // Cards puissance
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -313,7 +425,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ],
                             ),
                           ),
-                          const SizedBox(height: 18),
+                          SizedBox(height: hasCapteurs ? 12 : 18),
                           // Widget forçage
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -322,7 +434,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               onForce: _sendForce,
                             ),
                           ),
-                          const SizedBox(height: 14),
+                          SizedBox(height: hasCapteurs ? 10 : 14),
                           // Statut
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -362,7 +474,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ],
                             ),
                           ),
-                          const SizedBox(height: 16),
+                          SizedBox(height: hasCapteurs ? 10 : 16),
                         ],
                       ),
                     ),
@@ -526,6 +638,75 @@ class _GaugePainter extends CustomPainter {
 }
 
 // ── Card puissance ─────────────────────────────────────────────────────────────
+// ── Rangée de capteurs température ─────────────────────────────────────────────
+class CapteursRow extends StatelessWidget {
+  final List<int> indices;       // index (0-3) des capteurs actifs, dans l'ordre
+  final List<CapteurInfo> infos; // noms + activation, taille 4
+  final List<double?> temperatures; // valeurs, taille 4
+  const CapteursRow({
+    super.key,
+    required this.indices,
+    required this.infos,
+    required this.temperatures,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        for (var i = 0; i < indices.length; i++) ...[
+          if (i > 0) const SizedBox(width: 8),
+          Expanded(child: _CapteurBox(
+            nom: infos[indices[i]].nom,
+            temp: temperatures[indices[i]]!,
+          )),
+        ],
+      ],
+    );
+  }
+}
+
+class _CapteurBox extends StatelessWidget {
+  final String nom;
+  final double temp;
+  const _CapteurBox({required this.nom, required this.temp});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            nom,
+            maxLines: 2,
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 10, fontWeight: FontWeight.w500,
+              color: Color(0xFF5A6278), height: 1.15,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${temp.round()}°C', // jusqu'à 3 digits (ex: 100°C) sans débordement
+            style: const TextStyle(
+              fontFamily: 'monospace', fontSize: 17, fontWeight: FontWeight.w500,
+              color: Color(0xFFE8EAF0), height: 1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class PowerCard extends StatelessWidget {
   final String label;
   final double value;
@@ -555,11 +736,18 @@ class PowerCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 6),
-          Text('${value.round()}',
-              style: TextStyle(fontFamily: 'monospace', fontSize: 30,
-                  fontWeight: FontWeight.w500, color: color, height: 1)),
-          const Text('W',
-              style: TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace')),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text('${value.round()}',
+                  style: TextStyle(fontFamily: 'monospace', fontSize: 30,
+                      fontWeight: FontWeight.w500, color: color, height: 1)),
+              const SizedBox(width: 4),
+              const Text('W',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace')),
+            ],
+          ),
         ],
       ),
     );
