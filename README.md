@@ -21,6 +21,7 @@ v2.4.1 - correction alignement affichage capteurs
 v2.5.1 - prise en charge des Relais SSR & Multi Modules pour le forçage individuel
 
 
+--------
 
 
 A compiler sur Android Studio: 
