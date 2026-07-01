@@ -17,6 +17,7 @@ v2.3.0 - prise en charge du mot de passe pour le Forçage ON/OFF
 v2.4.0 - affichage des capteurs de températures si présents/configurés
 
 v2.4.1 - correction alignement affichage capteurs 
+
 v2.5.1 - prise en charge des Relais SSR & Multi Modules pour le forçage individuel
 
 
