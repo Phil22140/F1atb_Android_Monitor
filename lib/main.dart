@@ -37,7 +37,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '2.4.1';
+const String appVersion = '2.5.1';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -102,41 +102,61 @@ String equivToHmn(String raw) {
   return '$h:${m.toString().padLeft(2, '0')}';
 }
 
-// ── Parsing /ajax_etatActions ─────────────────────────────────────────────────
-class ActionData {
-  final double? ouverture;
-  final String? heureEquiv;
-  final int forcage; // 0=auto, >0=forcé ON (minutes restantes), <0=forcé OFF
-  const ActionData({this.ouverture, this.heureEquiv, this.forcage = 0});
+// ── Parsing /ajax_etatActions (multi-modules : Triac unique ou relais SSR 1-9) ─
+class ModuleData {
+  final int numAction;       // NumAction réel à utiliser pour le forçage
+  final String nom;          // nom du contacteur (ex: "Chauffe-Eau", "Relais 1")
+  final double? ouverture;   // % ouverture (ou 100/0 si 'On'/'Off')
+  final int forcage;         // 0=auto, >0=forcé ON (min restantes), <0=forcé OFF
+  final String? heureEquiv;  // équivalence HH:MM à 100%
+  const ModuleData({
+    required this.numAction,
+    required this.nom,
+    this.ouverture,
+    this.forcage = 0,
+    this.heureEquiv,
+  });
 }
 
-ActionData parseActionneur(String body) {
+List<ModuleData> parseActionneurs(String body) {
   final groupes = body.split(GS);
-  if (groupes.length < 5) return const ActionData();
-  final data = groupes[4].split(RS);
-  if (data.length < 3) return const ActionData();
+  if (groupes.length < 5) return [];
 
-  // data[2] = ouverture (%, 'On', 'Off')
-  final v = data[2].trim();
-  double? ouverture;
-  if (v == 'On')       ouverture = 100;
-  else if (v == 'Off') ouverture = 0;
-  else                 ouverture = double.tryParse(v);
+  final modules = <ModuleData>[];
+  // groupes[4..] : un groupe par module actif
+  for (var i = 4; i < groupes.length; i++) {
+    final raw = groupes[i].trim();
+    if (raw.isEmpty) continue;
+    final data = raw.split(RS);
+    if (data.length < 3) continue;
 
-  // data[3] = forçage en minutes (0=auto, >0=forcé ON, <0=forcé OFF)
-  int forcage = 0;
-  if (data.length >= 4) {
-    forcage = int.tryParse(data[3].trim()) ?? 0;
+    final numAction = int.tryParse(data[0].trim()) ?? 0;
+    final nom = data[1].trim();
+
+    final v = data[2].trim();
+    double? ouverture;
+    if (v == 'On')       ouverture = 100;
+    else if (v == 'Off') ouverture = 0;
+    else                 ouverture = double.tryParse(v);
+
+    int forcage = 0;
+    if (data.length >= 4) forcage = int.tryParse(data[3].trim()) ?? 0;
+
+    String? heureEquiv;
+    if (data.length >= 5) {
+      final rawH = data[4].trim();
+      if (rawH.isNotEmpty) heureEquiv = equivToHmn(rawH);
+    }
+
+    modules.add(ModuleData(
+      numAction: numAction,
+      nom: nom,
+      ouverture: ouverture,
+      forcage: forcage,
+      heureEquiv: heureEquiv,
+    ));
   }
-
-  // data[4] = équivalence heure
-  String? heureEquiv;
-  if (data.length >= 5) {
-    final raw = data[4].trim();
-    if (raw.isNotEmpty) heureEquiv = equivToHmn(raw);
-  }
-
-  return ActionData(ouverture: ouverture, heureEquiv: heureEquiv, forcage: forcage);
+  return modules;
 }
 
 // ── App principale ─────────────────────────────────────────────────────────────
@@ -171,9 +191,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   String _esp32Url = '';
   String _password = '';
-  double? _ce;
-  String? _heureEquiv;
-  int _forcage = 0;
+  List<ModuleData> _modules = [];
+  int? _selectedNumAction; // module sélectionné quand plusieurs modules (null = aucun)
   List<CapteurInfo> _capteursInfo = List.generate(4, (i) => const CapteurInfo(nom: '', actif: false));
   List<double?> _temperatures = [null, null, null, null];
   double _pws = 0;
@@ -244,18 +263,25 @@ class _HomeScreenState extends State<HomeScreen> {
       ]).timeout(const Duration(seconds: 10));
 
       final pw = parsePuissances(results[0]);
-      final action = parseActionneur(results[1]);
+      final modules = parseActionneurs(results[1]);
       final temps = parseTemperatures(results[0]);
 
       setState(() {
         _pws = pw['pws']!;
         _pwi = pw['pwi']!;
-        _ce = action.ouverture;
-        _heureEquiv = action.heureEquiv;
-        _forcage = action.forcage;
+        _modules = modules;
         _temperatures = temps;
         _ok = true;
         _statusTxt = 'màj ${TimeOfDay.now().format(context)}';
+        // Si un seul module, sélection automatique permanente
+        if (modules.length == 1) {
+          _selectedNumAction = modules.first.numAction;
+        }
+        // Si le module sélectionné a disparu (changement de config ESP32), on désélectionne
+        else if (_selectedNumAction != null &&
+            !modules.any((m) => m.numAction == _selectedNumAction)) {
+          _selectedNumAction = null;
+        }
       });
     } catch (e) {
       setState(() {
@@ -266,12 +292,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _sendForce(int force) async {
+    if (_selectedNumAction == null) return;
     try {
       final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
       final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
-      await simpleGet('$base/ajax_etatActions?Force=$force&NumAction=0', cookie: cookie);
+      await simpleGet(
+        '$base/ajax_etatActions?Force=$force&NumAction=$_selectedNumAction',
+        cookie: cookie,
+      );
       await _refresh(); // rafraîchit immédiatement après l'action
     } catch (_) {}
+  }
+
+  void _selectModule(int numAction) {
+    setState(() => _selectedNumAction = numAction);
   }
 
   void _showConfig() {
@@ -303,7 +337,17 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
     final hasCapteurs = capteursActifs.isNotEmpty;
-    final imageHeight = hasCapteurs ? 100.0 : 150.0;
+    final multiModules = _modules.length > 1;
+    final compactHeader = hasCapteurs || multiModules; // mode mini-image + titre
+    final imageHeight = compactHeader ? 100.0 : 150.0;
+
+    // Module actuellement sélectionné (pour le widget de forçage)
+    ModuleData? selected;
+    if (_selectedNumAction != null) {
+      for (final m in _modules) {
+        if (m.numAction == _selectedNumAction) { selected = m; break; }
+      }
+    }
 
     return Scaffold(
       body: Stack(
@@ -316,7 +360,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 bottom: false,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-                  child: hasCapteurs
+                  child: compactHeader
                   // Layout compact : image à gauche + texte centré à droite
                       ? Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
@@ -368,8 +412,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          SizedBox(height: hasCapteurs ? 2 : 20),
-                          if (!hasCapteurs) ...[
+                          SizedBox(height: compactHeader ? 2 : 20),
+                          if (!compactHeader) ...[
                             const Text(
                               'F1ATB MONITOR',
                               style: TextStyle(
@@ -381,20 +425,33 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                             const SizedBox(height: 24),
                           ],
-                          // Jauge circulaire
-                          GaugeWidget(value: _ce ?? 0, hasValue: _ce != null),
-                          SizedBox(height: hasCapteurs ? 2 : 8),
-                          // Équivalence heure (ex: 0:08 = 8 min à 100%)
-                          if (_heureEquiv != null)
+                          // Jauge(s) : une seule grande jauge, ou une grille si plusieurs modules
+                          if (!multiModules)
+                            GaugeWidget(
+                              value: _modules.isNotEmpty ? (_modules.first.ouverture ?? 0) : 0,
+                              hasValue: _modules.isNotEmpty && _modules.first.ouverture != null,
+                            )
+                          else
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              child: ModulesGrid(
+                                modules: _modules,
+                                selectedNumAction: _selectedNumAction,
+                                onSelect: _selectModule,
+                              ),
+                            ),
+                          SizedBox(height: compactHeader ? 2 : 8),
+                          // Équivalence heure (mode mono-module uniquement)
+                          if (!multiModules && _modules.isNotEmpty && _modules.first.heureEquiv != null)
                             Text(
-                              'équivalent à $_heureEquiv à 100%',
+                              'équivalent à ${_modules.first.heureEquiv} à 100%',
                               style: const TextStyle(
                                 fontSize: 13,
                                 color: Color(0xFF5A6278),
                                 fontFamily: 'monospace',
                               ),
                             ),
-                          SizedBox(height: hasCapteurs ? 6 : 16),
+                          SizedBox(height: compactHeader ? 6 : 16),
                           if (hasCapteurs)
                             Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -424,16 +481,22 @@ class _HomeScreenState extends State<HomeScreen> {
                               ],
                             ),
                           ),
-                          SizedBox(height: hasCapteurs ? 12 : 18),
-                          // Widget forçage
+                          SizedBox(height: compactHeader ? 12 : 18),
+                          // Widget forçage — grisé/inactif tant qu'aucun module sélectionné
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: ForceWidget(
-                              forcage: _forcage,
-                              onForce: _sendForce,
+                            child: IgnorePointer(
+                              ignoring: multiModules && selected == null,
+                              child: Opacity(
+                                opacity: (multiModules && selected == null) ? 0.4 : 1.0,
+                                child: ForceWidget(
+                                  forcage: selected?.forcage ?? 0,
+                                  onForce: _sendForce,
+                                ),
+                              ),
                             ),
                           ),
-                          SizedBox(height: hasCapteurs ? 10 : 14),
+                          SizedBox(height: compactHeader ? 10 : 14),
                           // Statut
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -473,7 +536,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ],
                             ),
                           ),
-                          SizedBox(height: hasCapteurs ? 10 : 16),
+                          SizedBox(height: compactHeader ? 10 : 16),
                         ],
                       ),
                     ),
@@ -512,7 +575,17 @@ class _HomeScreenState extends State<HomeScreen> {
 class GaugeWidget extends StatelessWidget {
   final double value;
   final bool hasValue;
-  const GaugeWidget({super.key, required this.value, required this.hasValue});
+  final double size;
+  final double valueFontSize;
+  final bool showLabel;
+  const GaugeWidget({
+    super.key,
+    required this.value,
+    required this.hasValue,
+    this.size = 190,
+    this.valueFontSize = 46,
+    this.showLabel = true,
+  });
 
   // Dégradé rouge (0%, fermé) → orange → jaune → vert (100%, ouvert)
   static const List<Color> _gaugeColors = [
@@ -533,7 +606,7 @@ class GaugeWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 190, height: 190,
+      width: size, height: size,
       child: Stack(
         alignment: Alignment.center,
         children: [
@@ -542,8 +615,8 @@ class GaugeWidget extends StatelessWidget {
             duration: const Duration(milliseconds: 800),
             curve: Curves.easeInOut,
             builder: (_, v, __) => CustomPaint(
-              size: const Size(190, 190),
-              painter: _GaugePainter(v, _gaugeColors, _colorAt(v)),
+              size: Size(size, size),
+              painter: _GaugePainter(v, _gaugeColors, _colorAt(v), strokeWidth: size / 13.6),
             ),
           ),
           Column(
@@ -551,18 +624,19 @@ class GaugeWidget extends StatelessWidget {
             children: [
               Text(
                 hasValue ? '${value.round()}' : '--',
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'monospace',
-                  fontSize: 46,
+                  fontSize: valueFontSize,
                   fontWeight: FontWeight.w500,
-                  color: Color(0xFFE8EAF0),
+                  color: const Color(0xFFE8EAF0),
                   height: 1,
                 ),
               ),
-              const Text(
-                'ouverture %',
-                style: TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
-              ),
+              if (showLabel)
+                const Text(
+                  'ouverture %',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
+                ),
             ],
           ),
         ],
@@ -575,9 +649,9 @@ class _GaugePainter extends CustomPainter {
   final double progress; // 0..1
   final List<Color> gaugeColors;
   final Color cursorColor;
-  const _GaugePainter(this.progress, this.gaugeColors, this.cursorColor);
+  final double strokeWidth;
+  const _GaugePainter(this.progress, this.gaugeColors, this.cursorColor, {this.strokeWidth = 14});
 
-  static const double _strokeWidth = 14;
   // Arc de 270°, gap de 90° en bas : démarre à -135° (bas-gauche),
   // remonte par la gauche, passe par le haut, redescend à droite
   // jusqu'à +135° (bas-droite). Angles en radians, 0 = droite, sens horaire.
@@ -590,14 +664,14 @@ class _GaugePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final c = Offset(size.width / 2, size.height / 2);
-    final r = size.width / 2 - _strokeWidth;
+    final r = size.width / 2 - strokeWidth;
     final rect = Rect.fromCircle(center: c, radius: r);
 
     // Arc en dégradé conique rouge → orange → jaune → vert, limité à 270°
     // Le shader est calculé sur [0, 270°] puis pivoté de +135° via GradientRotation
     final ringPaint = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = _strokeWidth
+      ..strokeWidth = strokeWidth
       ..strokeCap = StrokeCap.round
       ..shader = SweepGradient(
         startAngle: _startAngle,
@@ -611,7 +685,7 @@ class _GaugePainter extends CustomPainter {
     // extrémité du trait. On réduit donc le sweep dessiné de cette quantité
     // (convertie en angle) de part et d'autre pour que le rendu final
     // s'arrête pile aux bornes voulues, sans déborder.
-    final capAngle = asin((_strokeWidth / 2) / r);
+    final capAngle = asin((strokeWidth / 2) / r);
     final drawStart = _angleOffset + capAngle;
     final drawSweep = _sweepAngle - 2 * capAngle;
 
@@ -625,18 +699,149 @@ class _GaugePainter extends CustomPainter {
     );
 
     final haloPaint = Paint()..color = Colors.white;
-    canvas.drawCircle(cursorCenter, _strokeWidth * 0.65, haloPaint);
+    canvas.drawCircle(cursorCenter, strokeWidth * 0.65, haloPaint);
 
     final dotPaint = Paint()..color = cursorColor;
-    canvas.drawCircle(cursorCenter, _strokeWidth * 0.42, dotPaint);
+    canvas.drawCircle(cursorCenter, strokeWidth * 0.42, dotPaint);
   }
 
   @override
   bool shouldRepaint(_GaugePainter old) =>
-      old.progress != progress || old.cursorColor != cursorColor;
+      old.progress != progress || old.cursorColor != cursorColor || old.strokeWidth != strokeWidth;
 }
 
 // ── Card puissance ─────────────────────────────────────────────────────────────
+// ── Grille de jauges multi-modules (relais SSR) ────────────────────────────────
+class ModulesGrid extends StatelessWidget {
+  final List<ModuleData> modules;
+  final int? selectedNumAction;
+  final void Function(int) onSelect;
+  const ModulesGrid({
+    super.key,
+    required this.modules,
+    required this.selectedNumAction,
+    required this.onSelect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Répartition :
+    //   2 modules → 2/ligne
+    //   3 modules → 3/ligne (tout sur une ligne)
+    //   4 modules → 2x2
+    //   5-9 modules → 3/ligne
+    final perRow = (modules.length == 2 || modules.length == 4) ? 2 : 3;
+
+    // Taille jauge selon la densité
+    final gaugeSize = perRow == 2 ? 138.0 : 95.0;
+
+    // Construction des lignes avec remplissage null pour la dernière ligne incomplète
+    final rows = <List<ModuleData?>>[];
+    for (var i = 0; i < modules.length; i += perRow) {
+      final row = <ModuleData?>[];
+      for (var j = i; j < i + perRow; j++) {
+        row.add(j < modules.length ? modules[j] : null);
+      }
+      rows.add(row);
+    }
+
+    return Column(
+      children: [
+        for (final row in rows) ...[
+          Row(
+            // Expanded garantit que chaque cellule prend exactement 1/perRow de la largeur
+            // → centrage parfait quelle que soit la taille de la jauge
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final m in row)
+                Expanded(
+                  child: m != null
+                      ? _ModuleGaugeTile(
+                    module: m,
+                    selected: m.numAction == selectedNumAction,
+                    onTap: () => onSelect(m.numAction),
+                    size: gaugeSize,
+                  )
+                      : const SizedBox(), // cellule vide pour compléter la dernière ligne
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+        ],
+      ],
+    );
+  }
+}
+
+class _ModuleGaugeTile extends StatelessWidget {
+  final ModuleData module;
+  final bool selected;
+  final VoidCallback onTap;
+  final double size;
+  const _ModuleGaugeTile({
+    required this.module,
+    required this.selected,
+    required this.onTap,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: selected ? const Color(0xFF3B82F6) : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GaugeWidget(
+              value: module.ouverture ?? 0,
+              hasValue: module.ouverture != null,
+              size: size,
+              valueFontSize: size / 4.2,
+              showLabel: false,
+            ),
+            const SizedBox(height: 2),
+            // Nom du module
+            Text(
+              module.nom,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: size > 120 ? 11 : 9,
+                fontWeight: FontWeight.w500,
+                color: const Color(0xFF5A6278),
+              ),
+            ),
+            // Équivalence heure (si disponible)
+            if (module.heureEquiv != null) ...[
+              const SizedBox(height: 1),
+              Text(
+                '≡ ${module.heureEquiv}',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: size > 120 ? 10 : 8,
+                  fontFamily: 'monospace',
+                  color: const Color(0xFF3A4258),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ── Rangée de capteurs température ─────────────────────────────────────────────
 class CapteursRow extends StatelessWidget {
   final List<int> indices;       // index (0-3) des capteurs actifs, dans l'ordre
