@@ -24,6 +24,8 @@ v2.6.2 - Prise en charge l'orientation Smartphone/Tablette avec possibilité de 
 
 v3.0.2 - Prise en charge de plusieurs EPS en multipage
 
+v3.3.0 - Prise en charge seconde sonde si déclarée & corrections bug sauvegarde multi ESP
+
 
 --------
 
