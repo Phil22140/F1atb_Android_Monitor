@@ -33,7 +33,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '2.6.2';
+const String appVersion = '3.0.2';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -176,50 +176,114 @@ class ChauffeEauApp extends StatelessWidget {
   }
 }
 
+// ── Config et état par ESP32 ───────────────────────────────────────────────────
+class EspConfig {
+  final String name;
+  final String url;
+  final String password;
+  const EspConfig({required this.name, required this.url, required this.password});
+}
+
+class EspState {
+  final List<ModuleData> modules;
+  final int? selectedNumAction;
+  final List<CapteurInfo> capteursInfo;
+  final List<double?> temperatures;
+  final double pws;
+  final double pwi;
+  final bool ok;
+  final String statusTxt;
+  final String? routerVersion;
+
+  EspState({
+    this.modules = const [],
+    this.selectedNumAction,
+    List<CapteurInfo>? capteursInfo,
+    List<double?>? temperatures,
+    this.pws = 0,
+    this.pwi = 0,
+    this.ok = false,
+    this.statusTxt = 'connexion…',
+    this.routerVersion,
+  })  : capteursInfo = capteursInfo ?? const [],
+        temperatures = temperatures ?? const [null, null, null, null];
+
+  EspState copyWith({
+    List<ModuleData>? modules,
+    int? selectedNumAction,
+    bool clearSelected = false,
+    List<CapteurInfo>? capteursInfo,
+    List<double?>? temperatures,
+    double? pws,
+    double? pwi,
+    bool? ok,
+    String? statusTxt,
+    String? routerVersion,
+  }) {
+    return EspState(
+      modules: modules ?? this.modules,
+      selectedNumAction: clearSelected ? null : (selectedNumAction ?? this.selectedNumAction),
+      capteursInfo: capteursInfo ?? this.capteursInfo,
+      temperatures: temperatures ?? this.temperatures,
+      pws: pws ?? this.pws,
+      pwi: pwi ?? this.pwi,
+      ok: ok ?? this.ok,
+      statusTxt: statusTxt ?? this.statusTxt,
+      routerVersion: routerVersion ?? this.routerVersion,
+    );
+  }
+}
+
 // ── Écran principal ────────────────────────────────────────────────────────────
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
-
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  String _esp32Url = '';
-  String _password = '';
-  String _orientationMode = 'auto'; // 'portrait', 'auto', 'landscape'
-  String? _routerVersion;
-  List<ModuleData> _modules = [];
-  int? _selectedNumAction; // module sélectionné quand plusieurs modules (null = aucun)
-  List<CapteurInfo> _capteursInfo = List.generate(4, (i) => const CapteurInfo(nom: '', actif: false));
-  List<double?> _temperatures = [null, null, null, null];
-  double _pws = 0;
-  double _pwi = 0;
-  bool _ok = false;
-  String _statusTxt = 'connexion…';
+  List<EspConfig> _espConfigs = [];
+  List<EspState>  _espStates  = [];
+  String _orientationMode = 'auto';
+  int _currentPage = 0;
+  late PageController _pageController;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
+    _pageController = PageController();
     _loadConfig();
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _pageController.dispose();
     super.dispose();
   }
 
+  // ── Config ──────────────────────────────────────────────────────────────────
+
   Future<void> _loadConfig() async {
     final prefs = await SharedPreferences.getInstance();
-    final url = prefs.getString('esp32_url') ?? '';
-    final pwd = prefs.getString('esp32_pwd') ?? '';
     final orientation = prefs.getString('orientation_mode') ?? 'auto';
-    if (url.isNotEmpty) {
+    final count = prefs.getInt('esp_count') ?? 1;
+    final configs = <EspConfig>[];
+    for (var i = 0; i < count; i++) {
+      // Rétrocompatibilité : l'ancien esp32_url/pwd sert pour le premier ESP
+      final url = prefs.getString('esp_${i}_url')
+          ?? (i == 0 ? prefs.getString('esp32_url') ?? '' : '');
+      final pwd = prefs.getString('esp_${i}_pwd')
+          ?? (i == 0 ? prefs.getString('esp32_pwd') ?? '' : '');
+      final name = prefs.getString('esp_${i}_name')
+          ?? (count == 1 ? 'F1ATB Monitor' : 'ESP ${i + 1}');
+      configs.add(EspConfig(name: name, url: url, password: pwd));
+    }
+    if (configs.isNotEmpty && configs.first.url.isNotEmpty) {
       setState(() {
-        _esp32Url = url;
-        _password = pwd;
+        _espConfigs = configs;
+        _espStates  = List.generate(configs.length, (_) => EspState());
         _orientationMode = orientation;
       });
       _applyOrientation(orientation);
@@ -229,12 +293,29 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _saveConfig(String url, String pwd, String orientation) async {
+  Future<void> _saveConfig(List<EspConfig> configs, String orientation) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('esp32_url', url);
-    await prefs.setString('esp32_pwd', pwd);
+    await prefs.setInt('esp_count', configs.length);
     await prefs.setString('orientation_mode', orientation);
-    setState(() { _esp32Url = url; _password = pwd; _orientationMode = orientation; });
+    for (var i = 0; i < configs.length; i++) {
+      await prefs.setString('esp_${i}_name', configs[i].name);
+      await prefs.setString('esp_${i}_url',  configs[i].url);
+      await prefs.setString('esp_${i}_pwd',  configs[i].password);
+    }
+    // Met aussi à jour les anciennes clés pour rétrocompatibilité
+    if (configs.isNotEmpty) {
+      await prefs.setString('esp32_url', configs.first.url);
+      await prefs.setString('esp32_pwd', configs.first.password);
+    }
+    setState(() {
+      _espConfigs = configs;
+      // Redimensionne _espStates en conservant les états existants
+      while (_espStates.length < configs.length) _espStates.add(EspState());
+      if (_espStates.length > configs.length) {
+        _espStates = _espStates.sublist(0, configs.length);
+      }
+      _orientationMode = orientation;
+    });
     _applyOrientation(orientation);
     _startPolling();
   }
@@ -242,37 +323,36 @@ class _HomeScreenState extends State<HomeScreen> {
   void _applyOrientation(String mode) {
     switch (mode) {
       case 'portrait':
-        SystemChrome.setPreferredOrientations([
-          DeviceOrientation.portraitUp,
-          DeviceOrientation.portraitDown,
-        ]);
+        SystemChrome.setPreferredOrientations(
+            [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
         break;
       case 'landscape':
-        SystemChrome.setPreferredOrientations([
-          DeviceOrientation.landscapeLeft,
-          DeviceOrientation.landscapeRight,
-        ]);
+        SystemChrome.setPreferredOrientations(
+            [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
         break;
-      default: // 'auto'
+      default:
         SystemChrome.setPreferredOrientations([]);
     }
   }
 
+  // ── Polling ─────────────────────────────────────────────────────────────────
+
   void _startPolling() {
     _timer?.cancel();
-    _fetchCapteursInfo(); // une seule fois, infos statiques
-    _refresh();
-    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refresh());
+    _fetchCapteursInfo(_currentPage);
+    _refreshEsp(_currentPage);
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshEsp(_currentPage));
   }
 
-  Future<void> _fetchCapteursInfo() async {
+  Future<void> _fetchCapteursInfo(int idx) async {
+    if (idx >= _espConfigs.length) return;
+    final cfg = _espConfigs[idx];
+    final base = cfg.url.trimRight().replaceAll(RegExp(r'/$'), '');
+    final cookie = cfg.password.isNotEmpty ? 'CleAcces=${cfg.password}' : null;
     try {
-      final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
-      final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
       final body = await simpleGet('$base/ParaFixe', cookie: cookie)
           .timeout(const Duration(seconds: 8));
       final infos = parseCapteursInfo(body);
-      // Version du firmware routeur F1ATB : VersionStocke / 100 → ex: 1720 → "17.20"
       String? routerVer;
       try {
         final data = jsonDecode(body) as Map<String, dynamic>;
@@ -280,67 +360,81 @@ class _HomeScreenState extends State<HomeScreen> {
         if (v != null) routerVer = (v / 100).toStringAsFixed(2);
       } catch (_) {}
       if (mounted) setState(() {
-        _capteursInfo = infos;
-        _routerVersion = routerVer;
+        _espStates[idx] = _espStates[idx].copyWith(
+          capteursInfo: infos,
+          routerVersion: routerVer,
+        );
       });
-    } catch (_) {
-      // pas bloquant : sans ces infos, les capteurs ne s'affichent simplement pas
-    }
+    } catch (_) {}
   }
 
-  Future<void> _refresh() async {
+  Future<void> _refreshEsp(int idx) async {
+    if (idx >= _espConfigs.length) return;
+    final cfg = _espConfigs[idx];
+    final base = cfg.url.trimRight().replaceAll(RegExp(r'/$'), '');
+    final cookie = cfg.password.isNotEmpty ? 'CleAcces=${cfg.password}' : null;
     try {
-      final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
-      final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
       final results = await Future.wait([
         simpleGet('$base/ajax_data', cookie: cookie),
         simpleGet('$base/ajax_etatActions?Force=0&NumAction=0', cookie: cookie),
       ]).timeout(const Duration(seconds: 10));
 
-      final pw = parsePuissances(results[0]);
+      final pw      = parsePuissances(results[0]);
       final modules = parseActionneurs(results[1]);
-      final temps = parseTemperatures(results[0]);
+      final temps   = parseTemperatures(results[0]);
 
-      setState(() {
-        _pws = pw['pws']!;
-        _pwi = pw['pwi']!;
-        _modules = modules;
-        _temperatures = temps;
-        _ok = true;
-        _statusTxt = 'màj ${TimeOfDay.now().format(context)}';
-        // Si un seul module, sélection automatique permanente
-        if (modules.length == 1) {
-          _selectedNumAction = modules.first.numAction;
-        }
-        // Si le module sélectionné a disparu (changement de config ESP32), on désélectionne
-        else if (_selectedNumAction != null &&
-            !modules.any((m) => m.numAction == _selectedNumAction)) {
-          _selectedNumAction = null;
-        }
+      final old = _espStates[idx];
+      int? sel = old.selectedNumAction;
+      if (modules.length == 1) {
+        sel = modules.first.numAction;
+      } else if (sel != null && !modules.any((m) => m.numAction == sel)) {
+        sel = null;
+      }
+
+      if (mounted) setState(() {
+        _espStates[idx] = old.copyWith(
+          modules: modules,
+          selectedNumAction: sel,
+          temperatures: temps,
+          pws: pw['pws']!,
+          pwi: pw['pwi']!,
+          ok: true,
+          statusTxt: 'màj ${TimeOfDay.now().format(context)}',
+        );
       });
     } catch (e) {
-      setState(() {
-        _ok = false;
-        _statusTxt = 'erreur : $e';
+      if (mounted) setState(() {
+        _espStates[idx] = _espStates[idx].copyWith(
+          ok: false,
+          statusTxt: 'erreur : $e',
+        );
       });
     }
   }
 
-  Future<void> _sendForce(int force) async {
-    if (_selectedNumAction == null) return;
+  // ── Actions ─────────────────────────────────────────────────────────────────
+
+  Future<void> _sendForce(int espIdx, int force) async {
+    if (espIdx >= _espStates.length) return;
+    final state = _espStates[espIdx];
+    if (state.selectedNumAction == null) return;
+    final cfg = _espConfigs[espIdx];
+    final base = cfg.url.trimRight().replaceAll(RegExp(r'/$'), '');
+    final cookie = cfg.password.isNotEmpty ? 'CleAcces=${cfg.password}' : null;
     try {
-      final base = _esp32Url.trimRight().replaceAll(RegExp(r'/$'), '');
-      final cookie = _password.isNotEmpty ? 'CleAcces=$_password' : null;
       await simpleGet(
-        '$base/ajax_etatActions?Force=$force&NumAction=$_selectedNumAction',
+        '$base/ajax_etatActions?Force=$force&NumAction=${state.selectedNumAction}',
         cookie: cookie,
       );
-      await _refresh(); // rafraîchit immédiatement après l'action
+      await _refreshEsp(espIdx);
     } catch (_) {}
   }
 
-  void _selectModule(int numAction) {
-    setState(() => _selectedNumAction = numAction);
+  void _selectModule(int espIdx, int numAction) {
+    if (espIdx >= _espStates.length) return;
+    setState(() {
+      _espStates[espIdx] = _espStates[espIdx].copyWith(selectedNumAction: numAction);
+    });
   }
 
   void _showConfig() {
@@ -350,23 +444,23 @@ class _HomeScreenState extends State<HomeScreen> {
       isScrollControlled: true,
       backgroundColor: const Color(0xFF111827),
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => ConfigSheet(
-        currentUrl: _esp32Url,
-        currentPwd: _password,
+        currentConfigs: _espConfigs.isNotEmpty
+            ? _espConfigs
+            : [const EspConfig(name: 'F1ATB Monitor', url: '', password: '')],
         currentOrientation: _orientationMode,
-        onSave: (url, pwd, orientation) {
+        onSave: (configs, orientation) {
           Navigator.pop(context);
-          _saveConfig(url, pwd, orientation);
+          _saveConfig(configs, orientation);
         },
       ),
     );
   }
 
-  // ── Blocs partagés portrait / paysage ─────────────────────────────────────────
+  // ── Blocs réutilisables ─────────────────────────────────────────────────────
 
-  Widget _buildHeader({required bool compact, required double imageHeight}) {
+  Widget _buildHeader(EspConfig cfg, {required bool compact, required double imageHeight}) {
     if (compact) {
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
@@ -375,16 +469,14 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(16),
-              child: SizedBox(
-                width: imageHeight, height: imageHeight,
-                child: Image.asset('assets/icon.png', fit: BoxFit.cover),
-              ),
+              child: SizedBox(width: imageHeight, height: imageHeight,
+                  child: Image.asset('assets/icon.png', fit: BoxFit.cover)),
             ),
             const SizedBox(width: 12),
-            const Expanded(
-              child: Text('F1ATB MONITOR',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                      letterSpacing: 2.0, color: Color(0xFF5A6278))),
+            Expanded(
+              child: Text(cfg.name,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      letterSpacing: 1.5, color: Color(0xFF5A6278))),
             ),
           ],
         ),
@@ -394,305 +486,357 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(24),
-        child: SizedBox(
-          width: double.infinity, height: imageHeight,
-          child: Image.asset('assets/icon.png', fit: BoxFit.contain),
-        ),
+        child: SizedBox(width: double.infinity, height: imageHeight,
+            child: Image.asset('assets/icon.png', fit: BoxFit.contain)),
       ),
     );
   }
 
-  Widget _buildGauges({required bool multiModules, required bool compact}) {
+  Widget _buildGauges(EspState state, int espIdx,
+      {required bool multiModules}) {
     if (!multiModules) {
       return GaugeWidget(
-        value: _modules.isNotEmpty ? (_modules.first.ouverture ?? 0) : 0,
-        hasValue: _modules.isNotEmpty && _modules.first.ouverture != null,
+        value: state.modules.isNotEmpty ? (state.modules.first.ouverture ?? 0) : 0,
+        hasValue: state.modules.isNotEmpty && state.modules.first.ouverture != null,
       );
     }
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: ModulesGrid(
-        modules: _modules,
-        selectedNumAction: _selectedNumAction,
-        onSelect: _selectModule,
+        modules: state.modules,
+        selectedNumAction: state.selectedNumAction,
+        onSelect: (n) => _selectModule(espIdx, n),
       ),
     );
   }
 
-  Widget _buildEquiv({required bool multiModules}) {
-    if (!multiModules && _modules.isNotEmpty && _modules.first.heureEquiv != null) {
+  Widget _buildEquiv(EspState state, {required bool multiModules}) {
+    if (!multiModules && state.modules.isNotEmpty &&
+        state.modules.first.heureEquiv != null) {
       return Text(
-        'équivalent à ${_modules.first.heureEquiv} à 100%',
-        style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
+        'équivalent à ${state.modules.first.heureEquiv} à 100%',
+        style: const TextStyle(
+            fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
       );
     }
     return const SizedBox.shrink();
   }
 
-  Widget _buildPowerCards() {
-    return Row(
-      children: [
-        Expanded(child: PowerCard(label: 'Soutiré', value: _pws, color: const Color(0xFFF43F5E))),
-        const SizedBox(width: 10),
-        Expanded(child: PowerCard(label: 'Injecté', value: _pwi, color: const Color(0xFF22D3A8))),
-      ],
-    );
+  Widget _buildPowerCards(EspState state) {
+    return Row(children: [
+      Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
+          color: const Color(0xFFF43F5E))),
+      const SizedBox(width: 10),
+      Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
+          color: const Color(0xFF22D3A8))),
+    ]);
   }
 
-  Widget _buildForceWidget(ModuleData? selected, bool multiModules) {
+  Widget _buildForceWidget(EspState state, int espIdx,
+      ModuleData? selected, bool multiModules) {
     return IgnorePointer(
       ignoring: multiModules && selected == null,
       child: Opacity(
         opacity: (multiModules && selected == null) ? 0.4 : 1.0,
-        child: ForceWidget(forcage: selected?.forcage ?? 0, onForce: _sendForce),
+        child: ForceWidget(
+          forcage: selected?.forcage ?? 0,
+          onForce: (f) => _sendForce(espIdx, f),
+        ),
       ),
     );
   }
 
-  Widget _buildStatus() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          width: 6, height: 6,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: _ok ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E),
-            boxShadow: _ok ? [BoxShadow(
-                color: const Color(0xFF22D3A8).withOpacity(0.6), blurRadius: 6)] : null,
-          ),
+  Widget _buildStatus(EspState state) {
+    final verStr = state.routerVersion != null
+        ? 'v$appVersion · RMS ${state.routerVersion}'
+        : 'v$appVersion';
+    return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        width: 6, height: 6,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: state.ok ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E),
+          boxShadow: state.ok ? [BoxShadow(
+              color: const Color(0xFF22D3A8).withOpacity(0.6), blurRadius: 6)] : null,
         ),
-        const SizedBox(width: 7),
-        Flexible(
-          child: Text(_statusTxt, textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace')),
-        ),
-        const SizedBox(width: 12),
-        Text(
-          _routerVersion != null
-              ? 'v$appVersion · RMS $_routerVersion'
-              : 'v$appVersion',
-          style: const TextStyle(fontSize: 11, color: Color(0xFF3A4258), fontFamily: 'monospace'),
-        ),
-      ],
-    );
-  }
-
-  // ── Build principal ────────────────────────────────────────────────────────────
-  @override
-  Widget build(BuildContext context) {
-    final capteursActifs = <int>[];
-    for (var i = 0; i < 4; i++) {
-      if (_capteursInfo[i].actif && _temperatures[i] != null) capteursActifs.add(i);
-    }
-    final hasCapteurs = capteursActifs.isNotEmpty;
-    final multiModules = _modules.length > 1;
-    final compactHeader = hasCapteurs || multiModules;
-
-    ModuleData? selected;
-    if (_selectedNumAction != null) {
-      for (final m in _modules) {
-        if (m.numAction == _selectedNumAction) { selected = m; break; }
-      }
-    }
-
-    return Scaffold(
-      body: _orientationMode == 'portrait'
-          ? _buildPortrait(
-          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules, compactHeader: compactHeader, selected: selected)
-          : _orientationMode == 'landscape'
-          ? _buildLandscape(
-          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules, selected: selected)
-          : OrientationBuilder(
-        builder: (context, orientation) {
-          if (orientation == Orientation.landscape) {
-            return _buildLandscape(
-                capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-                multiModules: multiModules, selected: selected);
-          }
-          return _buildPortrait(
-              capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-              multiModules: multiModules, compactHeader: compactHeader,
-              selected: selected);
-        },
       ),
-    );
-  }
-
-  // ── Layout Portrait ────────────────────────────────────────────────────────────
-  Widget _buildPortrait({
-    required List<int> capteursActifs,
-    required bool hasCapteurs,
-    required bool multiModules,
-    required bool compactHeader,
-    required ModuleData? selected,
-  }) {
-    final imageHeight = compactHeader ? 100.0 : 150.0;
-
-    return Stack(
-      children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-                child: _buildHeader(compact: compactHeader, imageHeight: imageHeight),
-              ),
-            ),
-            Expanded(
-              child: SafeArea(
-                top: false,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(height: compactHeader ? 2 : 20),
-                      if (!compactHeader) ...[
-                        const Text('F1ATB MONITOR',
-                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                                letterSpacing: 2.5, color: Color(0xFF5A6278))),
-                        const SizedBox(height: 24),
-                      ],
-                      _buildGauges(multiModules: multiModules, compact: compactHeader),
-                      SizedBox(height: compactHeader ? 2 : 8),
-                      _buildEquiv(multiModules: multiModules),
-                      SizedBox(height: compactHeader ? 6 : 16),
-                      if (hasCapteurs) ...[
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 24),
-                          child: CapteursRow(
-                            indices: capteursActifs, infos: _capteursInfo,
-                            temperatures: _temperatures,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: _buildPowerCards(),
-                      ),
-                      SizedBox(height: compactHeader ? 12 : 18),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: _buildForceWidget(selected, multiModules),
-                      ),
-                      SizedBox(height: compactHeader ? 10 : 14),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: _buildStatus(),
-                      ),
-                      SizedBox(height: compactHeader ? 10 : 16),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-        // Bouton config
-        SafeArea(
-          bottom: false,
-          child: Align(
-            alignment: Alignment.topRight,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
-              child: _configButton(),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ── Layout Paysage ─────────────────────────────────────────────────────────────
-  Widget _buildLandscape({
-    required List<int> capteursActifs,
-    required bool hasCapteurs,
-    required bool multiModules,
-    required ModuleData? selected,
-  }) {
-    return SafeArea(
-      child: Stack(
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // ── Colonne gauche : header + jauge(s) + équivalence ──────────────
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(height: 8),
-                      _buildHeader(compact: true, imageHeight: 60),
-                      const SizedBox(height: 8),
-                      _buildGauges(multiModules: multiModules, compact: true),
-                      const SizedBox(height: 4),
-                      _buildEquiv(multiModules: multiModules),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                ),
-              ),
-              // Séparateur vertical discret
-              Container(
-                width: 0.5,
-                color: Colors.white.withOpacity(0.07),
-              ),
-              // ── Colonne droite : capteurs + puissances + forçage + statut ─────
-              Expanded(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (hasCapteurs) ...[
-                        CapteursRow(
-                          indices: capteursActifs, infos: _capteursInfo,
-                          temperatures: _temperatures,
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                      _buildPowerCards(),
-                      const SizedBox(height: 12),
-                      _buildForceWidget(selected, multiModules),
-                      const SizedBox(height: 10),
-                      _buildStatus(),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          // Bouton config en paysage (coin haut-droit)
-          Align(
-            alignment: Alignment.topRight,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
-              child: _configButton(),
-            ),
-          ),
-        ],
-      ),
-    );
+      const SizedBox(width: 7),
+      Flexible(child: Text(state.statusTxt, textAlign: TextAlign.center,
+          style: const TextStyle(
+              fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace'))),
+      const SizedBox(width: 12),
+      Text(verStr,
+          style: const TextStyle(
+              fontSize: 11, color: Color(0xFF3A4258), fontFamily: 'monospace')),
+    ]);
   }
 
   Widget _configButton() {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.3),
-        shape: BoxShape.circle,
-      ),
+          color: Colors.black.withOpacity(0.3), shape: BoxShape.circle),
       child: IconButton(
         onPressed: _showConfig,
         icon: const Icon(Icons.settings_outlined, color: Colors.white),
       ),
+    );
+  }
+
+  // ── Build principal ─────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    if (_espConfigs.isEmpty) {
+      return const Scaffold(
+          body: Center(child: CircularProgressIndicator()));
+    }
+    final multiEsp = _espConfigs.length > 1;
+    return Scaffold(
+      body: Stack(children: [
+        PageView.builder(
+          controller: _pageController,
+          onPageChanged: (i) {
+            setState(() => _currentPage = i);
+            _startPolling(); // bascule le polling sur le nouvel ESP
+          },
+          itemCount: _espConfigs.length,
+          itemBuilder: (ctx, idx) => _buildEspPage(ctx, idx),
+        ),
+        if (multiEsp)
+          Positioned(
+            bottom: 0, left: 0, right: 0,
+            child: SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _buildDots(),
+              ),
+            ),
+          ),
+      ]),
+    );
+  }
+
+  Widget _buildEspPage(BuildContext context, int idx) {
+    if (idx >= _espStates.length) return const SizedBox();
+    final cfg   = _espConfigs[idx];
+    final state = _espStates[idx];
+
+    final capteursActifs = <int>[];
+    for (var i = 0; i < 4; i++) {
+      if (state.capteursInfo.length > i && state.capteursInfo[i].actif &&
+          state.temperatures.length > i && state.temperatures[i] != null) {
+        capteursActifs.add(i);
+      }
+    }
+    final hasCapteurs   = capteursActifs.isNotEmpty;
+    final multiModules  = state.modules.length > 1;
+    final compactHeader = hasCapteurs || multiModules;
+
+    ModuleData? selected;
+    if (state.selectedNumAction != null) {
+      for (final m in state.modules) {
+        if (m.numAction == state.selectedNumAction) { selected = m; break; }
+      }
+    }
+
+    // Ajoute du padding en bas si plusieurs ESPs (pour les dots)
+    final bottomPad = _espConfigs.length > 1 ? 36.0 : 0.0;
+
+    if (_orientationMode == 'portrait') {
+      return _buildPortrait(cfg: cfg, state: state, espIdx: idx,
+          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+          multiModules: multiModules, compactHeader: compactHeader,
+          selected: selected, bottomPad: bottomPad);
+    }
+    if (_orientationMode == 'landscape') {
+      return _buildLandscape(cfg: cfg, state: state, espIdx: idx,
+          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+          multiModules: multiModules, selected: selected,
+          bottomPad: bottomPad);
+    }
+    return OrientationBuilder(builder: (ctx, orientation) {
+      if (orientation == Orientation.landscape) {
+        return _buildLandscape(cfg: cfg, state: state, espIdx: idx,
+            capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+            multiModules: multiModules, selected: selected,
+            bottomPad: bottomPad);
+      }
+      return _buildPortrait(cfg: cfg, state: state, espIdx: idx,
+          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+          multiModules: multiModules, compactHeader: compactHeader,
+          selected: selected, bottomPad: bottomPad);
+    });
+  }
+
+  Widget _buildDots() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (var i = 0; i < _espConfigs.length; i++)
+          GestureDetector(
+            onTap: () => _pageController.animateToPage(i,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              width: i == _currentPage ? 20 : 8,
+              height: 8,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(4),
+                color: i == _currentPage
+                    ? const Color(0xFFF97316)
+                    : Colors.white.withOpacity(0.3),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // ── Layout Portrait ─────────────────────────────────────────────────────────
+
+  Widget _buildPortrait({
+    required EspConfig cfg,
+    required EspState state,
+    required int espIdx,
+    required List<int> capteursActifs,
+    required bool hasCapteurs,
+    required bool multiModules,
+    required bool compactHeader,
+    required ModuleData? selected,
+    required double bottomPad,
+  }) {
+    final imageHeight = compactHeader ? 100.0 : 150.0;
+    return Stack(children: [
+      Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+            child: _buildHeader(cfg, compact: compactHeader, imageHeight: imageHeight),
+          ),
+        ),
+        Expanded(
+          child: SafeArea(
+            top: false,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                SizedBox(height: compactHeader ? 2 : 20),
+                if (!compactHeader) ...[
+                  Text(cfg.name,
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                          letterSpacing: 2.5, color: Color(0xFF5A6278))),
+                  const SizedBox(height: 24),
+                ],
+                _buildGauges(state, espIdx, multiModules: multiModules),
+                SizedBox(height: compactHeader ? 2 : 8),
+                _buildEquiv(state, multiModules: multiModules),
+                SizedBox(height: compactHeader ? 6 : 16),
+                if (hasCapteurs) ...[
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: CapteursRow(indices: capteursActifs,
+                        infos: state.capteursInfo,
+                        temperatures: state.temperatures),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: _buildPowerCards(state),
+                ),
+                SizedBox(height: compactHeader ? 12 : 18),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: _buildForceWidget(state, espIdx, selected, multiModules),
+                ),
+                SizedBox(height: compactHeader ? 10 : 14),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: _buildStatus(state),
+                ),
+                SizedBox(height: compactHeader ? 10 + bottomPad : 16 + bottomPad),
+              ]),
+            ),
+          ),
+        ),
+      ]),
+      SafeArea(
+        bottom: false,
+        child: Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
+            child: _configButton(),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  // ── Layout Paysage ──────────────────────────────────────────────────────────
+
+  Widget _buildLandscape({
+    required EspConfig cfg,
+    required EspState state,
+    required int espIdx,
+    required List<int> capteursActifs,
+    required bool hasCapteurs,
+    required bool multiModules,
+    required ModuleData? selected,
+    required double bottomPad,
+  }) {
+    return SafeArea(
+      child: Stack(children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const SizedBox(height: 8),
+                _buildHeader(cfg, compact: true, imageHeight: 60),
+                const SizedBox(height: 8),
+                _buildGauges(state, espIdx, multiModules: multiModules),
+                const SizedBox(height: 4),
+                _buildEquiv(state, multiModules: multiModules),
+                SizedBox(height: 8 + bottomPad),
+              ]),
+            ),
+          ),
+          Container(width: 0.5, color: Colors.white.withOpacity(0.07)),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomPad),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (hasCapteurs) ...[
+                    CapteursRow(indices: capteursActifs,
+                        infos: state.capteursInfo,
+                        temperatures: state.temperatures),
+                    const SizedBox(height: 10),
+                  ],
+                  _buildPowerCards(state),
+                  const SizedBox(height: 12),
+                  _buildForceWidget(state, espIdx, selected, multiModules),
+                  const SizedBox(height: 10),
+                  _buildStatus(state),
+                ],
+              ),
+            ),
+          ),
+        ]),
+        Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
+            child: _configButton(),
+          ),
+        ),
+      ]),
     );
   }
 }
@@ -1225,15 +1369,15 @@ class _ForceBtn extends StatelessWidget {
 }
 
 // ── Feuille de config ──────────────────────────────────────────────────────────
+
+// ── Feuille de config multi-ESP ────────────────────────────────────────────────
 class ConfigSheet extends StatefulWidget {
-  final String currentUrl;
-  final String currentPwd;
+  final List<EspConfig> currentConfigs;
   final String currentOrientation;
-  final void Function(String url, String pwd, String orientation) onSave;
+  final void Function(List<EspConfig>, String) onSave;
   const ConfigSheet({
     super.key,
-    required this.currentUrl,
-    required this.currentPwd,
+    required this.currentConfigs,
     required this.currentOrientation,
     required this.onSave,
   });
@@ -1243,23 +1387,51 @@ class ConfigSheet extends StatefulWidget {
 }
 
 class _ConfigSheetState extends State<ConfigSheet> {
-  late TextEditingController _urlCtrl;
-  late TextEditingController _pwdCtrl;
+  late List<Map<String, TextEditingController>> _ctrls;
   late String _orientation;
+  late int _count;
 
   @override
   void initState() {
     super.initState();
-    _urlCtrl = TextEditingController(text: widget.currentUrl);
-    _pwdCtrl = TextEditingController(text: widget.currentPwd);
     _orientation = widget.currentOrientation;
+    _count = widget.currentConfigs.length;
+    _ctrls = widget.currentConfigs.map((c) => {
+      'name': TextEditingController(text: c.name),
+      'url':  TextEditingController(text: c.url),
+      'pwd':  TextEditingController(text: c.password),
+    }).toList();
   }
 
   @override
   void dispose() {
-    _urlCtrl.dispose();
-    _pwdCtrl.dispose();
+    for (final m in _ctrls) {
+      m['name']!.dispose();
+      m['url']!.dispose();
+      m['pwd']!.dispose();
+    }
     super.dispose();
+  }
+
+  void _addEsp() {
+    if (_count >= 9) return;
+    setState(() {
+      _count++;
+      _ctrls.add({
+        'name': TextEditingController(text: 'ESP $_count'),
+        'url':  TextEditingController(),
+        'pwd':  TextEditingController(),
+      });
+    });
+  }
+
+  void _removeEsp() {
+    if (_count <= 1) return;
+    setState(() {
+      final last = _ctrls.removeLast();
+      last.values.forEach((c) => c.dispose());
+      _count--;
+    });
   }
 
   InputDecoration _inputDeco(String hint) => InputDecoration(
@@ -1267,16 +1439,17 @@ class _ConfigSheetState extends State<ConfigSheet> {
     hintStyle: const TextStyle(color: Color(0xFF5A6278)),
     filled: true,
     fillColor: const Color(0xFF0A0F1A),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     border: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
     ),
     enabledBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       borderSide: BorderSide(color: Colors.white.withOpacity(0.08)),
     ),
     focusedBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       borderSide: const BorderSide(color: Color(0xFFF97316)),
     ),
   );
@@ -1285,74 +1458,149 @@ class _ConfigSheetState extends State<ConfigSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        left: 24, right: 24, top: 24,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+        left: 20, right: 20, top: 20,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
       ),
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Configuration',
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                    letterSpacing: 2.5, color: Color(0xFF5A6278))),
+            // ── Titre + compteur ESP ──────────────────────────────────────────
+            Row(children: [
+              const Expanded(
+                child: Text('Configuration',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                        letterSpacing: 2.5, color: Color(0xFF5A6278))),
+              ),
+              // Stepper nombre d'ESP
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0A0F1A),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white.withOpacity(0.08)),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  _stepBtn('−', _count > 1, _removeEsp),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Text('$_count ESP',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: Color(0xFFE8EAF0))),
+                  ),
+                  _stepBtn('+', _count < 9, _addEsp),
+                ]),
+              ),
+            ]),
             const SizedBox(height: 16),
-            const Text('URL de l\'ESP32',
-                style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _urlCtrl,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
-              keyboardType: TextInputType.url,
-              autocorrect: false,
-              decoration: _inputDeco('http://192.168.1.X:PORT'),
-            ),
-            const SizedBox(height: 6),
-            const Text('Avec http:// et le port si nécessaire',
-                style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
-            const SizedBox(height: 16),
-            const Text('Mot de passe (optionnel)',
-                style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _pwdCtrl,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
-              obscureText: true,
-              autocorrect: false,
-              decoration: _inputDeco('Laisser vide si aucun'),
-            ),
-            const SizedBox(height: 6),
-            const Text('Requis pour le forçage ON/OFF',
-                style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
-            const SizedBox(height: 16),
+
+            // ── Groupes par ESP ───────────────────────────────────────────────
+            for (var i = 0; i < _ctrls.length; i++) ...[
+              if (_ctrls.length > 1)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1F2937),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text('ESP ${i + 1}',
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                          letterSpacing: 1.5, color: Color(0xFF5A6278))),
+                ),
+              // Nom
+              const Text('Nom', style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              const SizedBox(height: 4),
+              TextField(
+                controller: _ctrls[i]['name'],
+                style: const TextStyle(fontSize: 14, color: Color(0xFFE8EAF0)),
+                decoration: _inputDeco('Mon Routeur Solaire'),
+              ),
+              const SizedBox(height: 8),
+              // URL
+              const Text('URL', style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              const SizedBox(height: 4),
+              TextField(
+                controller: _ctrls[i]['url'],
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13,
+                    color: Color(0xFFE8EAF0)),
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                decoration: _inputDeco('http://192.168.1.X:PORT'),
+              ),
+              const SizedBox(height: 8),
+              // Mot de passe
+              const Text('Mot de passe (optionnel)',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              const SizedBox(height: 4),
+              TextField(
+                controller: _ctrls[i]['pwd'],
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13,
+                    color: Color(0xFFE8EAF0)),
+                obscureText: true,
+                autocorrect: false,
+                decoration: _inputDeco('Laisser vide si aucun'),
+              ),
+              const SizedBox(height: 16),
+              if (i < _ctrls.length - 1)
+                Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 16),
+            ],
+
+            // ── Orientation ───────────────────────────────────────────────────
             const Text('Orientation',
-                style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
+                style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
             const SizedBox(height: 8),
             _OrientationToggle(
               value: _orientation,
               onChanged: (v) => setState(() => _orientation = v),
             ),
             const SizedBox(height: 20),
+
+            // ── Bouton Connecter ──────────────────────────────────────────────
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () {
-                  var url = _urlCtrl.text.trim().replaceAll(RegExp(r'/$'), '');
-                  if (!url.startsWith('http')) url = 'http://$url';
-                  widget.onSave(url, _pwdCtrl.text.trim(), _orientation);
+                  final configs = _ctrls.map((m) {
+                    var url = m['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
+                    if (url.isNotEmpty && !url.startsWith('http')) url = 'http://$url';
+                    return EspConfig(
+                      name: m['name']!.text.trim().isEmpty
+                          ? 'ESP ${_ctrls.indexOf(m) + 1}'
+                          : m['name']!.text.trim(),
+                      url: url,
+                      password: m['pwd']!.text.trim(),
+                    );
+                  }).toList();
+                  widget.onSave(configs, _orientation);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
                 ),
                 child: const Text('Connecter',
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
               ),
             ),
           ],
-        ),  // SingleChildScrollView
+        ),
+      ),
+    );
+  }
+
+  Widget _stepBtn(String label, bool enabled, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: Container(
+        width: 36, height: 36,
+        alignment: Alignment.center,
+        child: Text(label,
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600,
+                color: enabled ? const Color(0xFFE8EAF0) : const Color(0xFF3A4258))),
       ),
     );
   }
@@ -1360,7 +1608,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
 // ── Toggle 3 positions pour l'orientation ──────────────────────────────────────
 class _OrientationToggle extends StatelessWidget {
-  final String value; // 'portrait', 'auto', 'landscape'
+  final String value;
   final void Function(String) onChanged;
   const _OrientationToggle({required this.value, required this.onChanged});
 
@@ -1378,44 +1626,37 @@ class _OrientationToggle extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.white.withOpacity(0.08)),
       ),
-      child: Row(
-        children: [
-          for (var i = 0; i < _options.length; i++) ...[
-            Expanded(
-              child: GestureDetector(
-                onTap: () => onChanged(_options[i].$1),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  decoration: BoxDecoration(
-                    color: value == _options[i].$1
-                        ? const Color(0xFFF97316)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.horizontal(
-                      left: i == 0 ? const Radius.circular(11) : Radius.zero,
-                      right: i == _options.length - 1
-                          ? const Radius.circular(11) : Radius.zero,
-                    ),
+      child: Row(children: [
+        for (var i = 0; i < _options.length; i++) ...[
+          Expanded(
+            child: GestureDetector(
+              onTap: () => onChanged(_options[i].$1),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                decoration: BoxDecoration(
+                  color: value == _options[i].$1
+                      ? const Color(0xFFF97316) : Colors.transparent,
+                  borderRadius: BorderRadius.horizontal(
+                    left:  i == 0 ? const Radius.circular(11) : Radius.zero,
+                    right: i == _options.length - 1
+                        ? const Radius.circular(11) : Radius.zero,
                   ),
-                  child: Text(
-                    _options[i].$2,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
+                ),
+                child: Text(_options[i].$2,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
                       color: value == _options[i].$1
-                          ? Colors.white
-                          : const Color(0xFF5A6278),
-                    ),
-                  ),
+                          ? Colors.white : const Color(0xFF5A6278)),
                 ),
               ),
             ),
-            if (i < _options.length - 1)
-              Container(width: 0.5, height: 36, color: Colors.white.withOpacity(0.08)),
-          ],
+          ),
+          if (i < _options.length - 1)
+            Container(width: 0.5, height: 36,
+                color: Colors.white.withOpacity(0.08)),
         ],
-      ),
+      ]),
     );
   }
 }
