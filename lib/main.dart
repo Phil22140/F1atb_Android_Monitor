@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Client HTTP natif, plus permissif que le package http ─────────────────────
@@ -33,18 +34,23 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.0.2';
+const String appVersion = '3.3.0';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
 Map<String, double> parsePuissances(String body) {
   final groupes = body.split(GS);
-  if (groupes.length < 2) return {'pws': 0, 'pwi': 0};
+  if (groupes.length < 2) return {'pws': 0.0, 'pwi': 0.0, 'pwsT': 0.0, 'pwiT': 0.0};
   final g1 = groupes[1].split(RS);
-  return {
-    'pws': double.tryParse(g1[0].trim()) ?? 0,
-    'pwi': g1.length > 1 ? (double.tryParse(g1[1].trim()) ?? 0) : 0,
-  };
+  final pws = double.tryParse(g1[0].trim()) ?? 0.0;
+  final pwi = g1.length > 1 ? (double.tryParse(g1[1].trim()) ?? 0.0) : 0.0;
+  double pwsT = 0.0, pwiT = 0.0;
+  if (groupes.length >= 3) {
+    final g2 = groupes[2].split(RS);
+    pwsT = double.tryParse(g2[0].trim()) ?? 0.0;
+    pwiT = g2.length > 1 ? (double.tryParse(g2[1].trim()) ?? 0.0) : 0.0;
+  }
+  return {'pws': pws, 'pwi': pwi, 'pwsT': pwsT, 'pwiT': pwiT};
 }
 
 // ── Parsing des températures (G0[5] de /ajax_data) ────────────────────────────
@@ -191,6 +197,12 @@ class EspState {
   final List<double?> temperatures;
   final double pws;
   final double pwi;
+  final double pwsT;   // puissance soutirée sonde fixe (Triac)
+  final double pwiT;   // puissance injectée sonde fixe (Triac)
+  final String nomSonde1; // nom sonde mobile (G1)
+  final String nomSonde2; // nom sonde fixe (G2) — vide = pas de seconde sonde
+  final String nomPpos;   // label puissance positive sonde fixe (ex: "Soutiré")
+  final String nomPneg;   // label puissance négative sonde fixe (ex: "Injecté")
   final bool ok;
   final String statusTxt;
   final String? routerVersion;
@@ -202,6 +214,12 @@ class EspState {
     List<double?>? temperatures,
     this.pws = 0,
     this.pwi = 0,
+    this.pwsT = 0,
+    this.pwiT = 0,
+    this.nomSonde1 = '',
+    this.nomSonde2 = '',
+    this.nomPpos = 'Soutiré',
+    this.nomPneg = 'Injecté',
     this.ok = false,
     this.statusTxt = 'connexion…',
     this.routerVersion,
@@ -216,6 +234,12 @@ class EspState {
     List<double?>? temperatures,
     double? pws,
     double? pwi,
+    double? pwsT,
+    double? pwiT,
+    String? nomSonde1,
+    String? nomSonde2,
+    String? nomPpos,
+    String? nomPneg,
     bool? ok,
     String? statusTxt,
     String? routerVersion,
@@ -227,6 +251,12 @@ class EspState {
       temperatures: temperatures ?? this.temperatures,
       pws: pws ?? this.pws,
       pwi: pwi ?? this.pwi,
+      pwsT: pwsT ?? this.pwsT,
+      pwiT: pwiT ?? this.pwiT,
+      nomSonde1: nomSonde1 ?? this.nomSonde1,
+      nomSonde2: nomSonde2 ?? this.nomSonde2,
+      nomPpos: nomPpos ?? this.nomPpos,
+      nomPneg: nomPneg ?? this.nomPneg,
       ok: ok ?? this.ok,
       statusTxt: statusTxt ?? this.statusTxt,
       routerVersion: routerVersion ?? this.routerVersion,
@@ -265,21 +295,92 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Config ──────────────────────────────────────────────────────────────────
 
+  // ── Fichier de config (plus fiable que SharedPreferences sur Android) ─────
+  Future<File> get _configFile async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/esp_config.json');
+  }
+
   Future<void> _loadConfig() async {
-    final prefs = await SharedPreferences.getInstance();
-    final orientation = prefs.getString('orientation_mode') ?? 'auto';
-    final count = prefs.getInt('esp_count') ?? 1;
-    final configs = <EspConfig>[];
-    for (var i = 0; i < count; i++) {
-      // Rétrocompatibilité : l'ancien esp32_url/pwd sert pour le premier ESP
-      final url = prefs.getString('esp_${i}_url')
-          ?? (i == 0 ? prefs.getString('esp32_url') ?? '' : '');
-      final pwd = prefs.getString('esp_${i}_pwd')
-          ?? (i == 0 ? prefs.getString('esp32_pwd') ?? '' : '');
-      final name = prefs.getString('esp_${i}_name')
-          ?? (count == 1 ? 'F1ATB Monitor' : 'ESP ${i + 1}');
-      configs.add(EspConfig(name: name, url: url, password: pwd));
+    final configs     = <EspConfig>[];
+    String orientation = 'auto';
+
+    // ── Priorité 1 : fichier JSON (format actuel, fiable) ──────────────────
+    try {
+      final file = await _configFile;
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final data    = jsonDecode(content) as Map<String, dynamic>;
+        orientation   = (data['orientation'] as String?) ?? 'auto';
+        final list    = (data['configs'] as List).cast<Map<String, dynamic>>();
+        for (final c in list) {
+          configs.add(EspConfig(
+            name:     (c['name'] as String?) ?? 'ESP',
+            url:      (c['url']  as String?) ?? '',
+            password: (c['pwd']  as String?) ?? '',
+          ));
+        }
+      }
+    } catch (_) { configs.clear(); }
+
+    // ── Priorité 2 : SharedPreferences esp_configs_json (v3.2.0) ───────────
+    if (configs.isEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        orientation  = prefs.getString('orientation_mode') ?? orientation;
+        final json   = prefs.getString('esp_configs_json');
+        if (json != null) {
+          final list = (jsonDecode(json) as List).cast<Map<String, dynamic>>();
+          for (final c in list) {
+            configs.add(EspConfig(
+              name:     (c['name'] as String?) ?? 'ESP',
+              url:      (c['url']  as String?) ?? '',
+              password: (c['pwd']  as String?) ?? '',
+            ));
+          }
+        }
+      } catch (_) { configs.clear(); }
     }
+
+    // ── Priorité 3 : SharedPreferences multi-clés (v3.0-v3.1) ─────────────
+    if (configs.isEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        orientation  = prefs.getString('orientation_mode') ?? orientation;
+        // Découverte automatique — ne pas faire confiance à esp_count
+        int count    = prefs.getInt('esp_count') ?? 0;
+        if (count == 0) {
+          for (var i = 0; i < 9; i++) {
+            if (prefs.getString('esp_${i}_url') != null) count = i + 1;
+            else break;
+          }
+        }
+        if (count == 0) count = 1;
+        for (var i = 0; i < count; i++) {
+          final url  = prefs.getString('esp_${i}_url')
+              ?? (i == 0 ? prefs.getString('esp32_url') ?? '' : '');
+          final pwd  = prefs.getString('esp_${i}_pwd')
+              ?? (i == 0 ? prefs.getString('esp32_pwd') ?? '' : '');
+          final name = prefs.getString('esp_${i}_name')
+              ?? (count == 1 ? 'F1ATB Monitor' : 'ESP ${i + 1}');
+          configs.add(EspConfig(name: name, url: url, password: pwd));
+        }
+      } catch (_) { configs.clear(); }
+    }
+
+    // ── Priorité 4 : très ancienne clé unique ──────────────────────────────
+    if (configs.isEmpty || configs.first.url.isEmpty) {
+      try {
+        final prefs  = await SharedPreferences.getInstance();
+        final oldUrl = prefs.getString('esp32_url') ?? '';
+        final oldPwd = prefs.getString('esp32_pwd') ?? '';
+        if (oldUrl.isNotEmpty) {
+          configs.clear();
+          configs.add(EspConfig(name: 'F1ATB Monitor', url: oldUrl, password: oldPwd));
+        }
+      } catch (_) {}
+    }
+
     if (configs.isNotEmpty && configs.first.url.isNotEmpty) {
       setState(() {
         _espConfigs = configs;
@@ -294,22 +395,32 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveConfig(List<EspConfig> configs, String orientation) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('esp_count', configs.length);
-    await prefs.setString('orientation_mode', orientation);
-    for (var i = 0; i < configs.length; i++) {
-      await prefs.setString('esp_${i}_name', configs[i].name);
-      await prefs.setString('esp_${i}_url',  configs[i].url);
-      await prefs.setString('esp_${i}_pwd',  configs[i].password);
-    }
-    // Met aussi à jour les anciennes clés pour rétrocompatibilité
-    if (configs.isNotEmpty) {
-      await prefs.setString('esp32_url', configs.first.url);
-      await prefs.setString('esp32_pwd', configs.first.password);
-    }
+    // ── Sauvegarde dans un fichier JSON (synchrone = garanti sur disque) ───
+    try {
+      final file    = await _configFile;
+      final content = jsonEncode({
+        'orientation': orientation,
+        'configs': configs.map((c) => {
+          'name': c.name,
+          'url':  c.url,
+          'pwd':  c.password,
+        }).toList(),
+      });
+      await file.writeAsString(content, flush: true); // flush=true force l'écriture disque
+    } catch (_) {}
+
+    // ── Backward compat SharedPreferences (pour migration future) ──────────
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('orientation_mode', orientation);
+      if (configs.isNotEmpty) {
+        await prefs.setString('esp32_url', configs.first.url);
+        await prefs.setString('esp32_pwd', configs.first.password);
+      }
+    } catch (_) {}
+
     setState(() {
       _espConfigs = configs;
-      // Redimensionne _espStates en conservant les états existants
       while (_espStates.length < configs.length) _espStates.add(EspState());
       if (_espStates.length > configs.length) {
         _espStates = _espStates.sublist(0, configs.length);
@@ -354,15 +465,27 @@ class _HomeScreenState extends State<HomeScreen> {
           .timeout(const Duration(seconds: 8));
       final infos = parseCapteursInfo(body);
       String? routerVer;
+      String nomSonde1 = '';
+      String nomSonde2 = '';
+      String nomPpos   = 'Soutiré';
+      String nomPneg   = 'Injecté';
       try {
         final data = jsonDecode(body) as Map<String, dynamic>;
         final v = int.tryParse(data['VersionStocke']?.toString() ?? '');
         if (v != null) routerVer = (v / 100).toStringAsFixed(2);
+        nomSonde1 = (data['nomSondeMobile'] ?? '').toString();
+        nomSonde2 = (data['nomSondeFixe']  ?? '').toString();
+        nomPpos   = (data['nomSfixePpos']  ?? 'Soutiré').toString();
+        nomPneg   = (data['nomSfixePneg']  ?? 'Injecté').toString();
       } catch (_) {}
       if (mounted) setState(() {
         _espStates[idx] = _espStates[idx].copyWith(
           capteursInfo: infos,
           routerVersion: routerVer,
+          nomSonde1: nomSonde1,
+          nomSonde2: nomSonde2,
+          nomPpos: nomPpos,
+          nomPneg: nomPneg,
         );
       });
     } catch (_) {}
@@ -396,8 +519,10 @@ class _HomeScreenState extends State<HomeScreen> {
           modules: modules,
           selectedNumAction: sel,
           temperatures: temps,
-          pws: pw['pws']!,
-          pwi: pw['pwi']!,
+          pws:  pw['pws']!,
+          pwi:  pw['pwi']!,
+          pwsT: pw['pwsT']!,
+          pwiT: pw['pwiT']!,
           ok: true,
           statusTxt: 'màj ${TimeOfDay.now().format(context)}',
         );
@@ -450,9 +575,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ? _espConfigs
             : [const EspConfig(name: 'F1ATB Monitor', url: '', password: '')],
         currentOrientation: _orientationMode,
-        onSave: (configs, orientation) {
-          Navigator.pop(context);
-          _saveConfig(configs, orientation);
+        onSave: (configs, orientation) async {
+          await _saveConfig(configs, orientation); // sauvegarde d'abord
+          if (mounted) Navigator.pop(context);     // puis ferme
         },
       ),
     );
@@ -530,6 +655,34 @@ class _HomeScreenState extends State<HomeScreen> {
       Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
           color: const Color(0xFF22D3A8))),
     ]);
+  }
+
+  Widget _buildSecondeSonde(EspState state) {
+    if (state.nomSonde2.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Ligne de séparation + nom de la sonde
+        Row(children: [
+          Expanded(child: Divider(color: Colors.white.withOpacity(0.07), height: 1)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(state.nomSonde2.toUpperCase(),
+                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                    letterSpacing: 1.4, color: Color(0xFF5A6278))),
+          ),
+          Expanded(child: Divider(color: Colors.white.withOpacity(0.07), height: 1)),
+        ]),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(child: PowerCard(label: state.nomPpos,
+              value: state.pwsT, color: const Color(0xFFF43F5E))),
+          const SizedBox(width: 10),
+          Expanded(child: PowerCard(label: state.nomPneg,
+              value: state.pwiT, color: const Color(0xFF22D3A8))),
+        ]),
+      ],
+    );
   }
 
   Widget _buildForceWidget(EspState state, int espIdx,
@@ -623,6 +776,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final cfg   = _espConfigs[idx];
     final state = _espStates[idx];
 
+    // Portrait → toujours compact (image à gauche, titre à droite)
+    final multiModules  = state.modules.length > 1;
     final capteursActifs = <int>[];
     for (var i = 0; i < 4; i++) {
       if (state.capteursInfo.length > i && state.capteursInfo[i].actif &&
@@ -630,9 +785,7 @@ class _HomeScreenState extends State<HomeScreen> {
         capteursActifs.add(i);
       }
     }
-    final hasCapteurs   = capteursActifs.isNotEmpty;
-    final multiModules  = state.modules.length > 1;
-    final compactHeader = hasCapteurs || multiModules;
+    final hasCapteurs  = capteursActifs.isNotEmpty;
 
     ModuleData? selected;
     if (state.selectedNumAction != null) {
@@ -647,7 +800,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_orientationMode == 'portrait') {
       return _buildPortrait(cfg: cfg, state: state, espIdx: idx,
           capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules, compactHeader: compactHeader,
+          multiModules: multiModules,
           selected: selected, bottomPad: bottomPad);
     }
     if (_orientationMode == 'landscape') {
@@ -665,7 +818,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       return _buildPortrait(cfg: cfg, state: state, espIdx: idx,
           capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules, compactHeader: compactHeader,
+          multiModules: multiModules,
           selected: selected, bottomPad: bottomPad);
     });
   }
@@ -705,18 +858,17 @@ class _HomeScreenState extends State<HomeScreen> {
     required List<int> capteursActifs,
     required bool hasCapteurs,
     required bool multiModules,
-    required bool compactHeader,
     required ModuleData? selected,
     required double bottomPad,
   }) {
-    final imageHeight = compactHeader ? 100.0 : 150.0;
+    final imageHeight = 100.0;
     return Stack(children: [
       Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         SafeArea(
           bottom: false,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-            child: _buildHeader(cfg, compact: compactHeader, imageHeight: imageHeight),
+            child: _buildHeader(cfg, compact: true, imageHeight: imageHeight),
           ),
         ),
         Expanded(
@@ -724,17 +876,11 @@ class _HomeScreenState extends State<HomeScreen> {
             top: false,
             child: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
-                SizedBox(height: compactHeader ? 2 : 20),
-                if (!compactHeader) ...[
-                  Text(cfg.name,
-                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                          letterSpacing: 2.5, color: Color(0xFF5A6278))),
-                  const SizedBox(height: 24),
-                ],
+                const SizedBox(height: 8),
                 _buildGauges(state, espIdx, multiModules: multiModules),
-                SizedBox(height: compactHeader ? 2 : 8),
+                const SizedBox(height: 4),
                 _buildEquiv(state, multiModules: multiModules),
-                SizedBox(height: compactHeader ? 6 : 16),
+                const SizedBox(height: 10),
                 if (hasCapteurs) ...[
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -748,17 +894,24 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: _buildPowerCards(state),
                 ),
-                SizedBox(height: compactHeader ? 12 : 18),
+                const SizedBox(height: 12),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: _buildForceWidget(state, espIdx, selected, multiModules),
                 ),
-                SizedBox(height: compactHeader ? 10 : 14),
+                const SizedBox(height: 10),
+                if (state.nomSonde2.isNotEmpty) ...[
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: _buildSecondeSonde(state),
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: _buildStatus(state),
                 ),
-                SizedBox(height: compactHeader ? 10 + bottomPad : 16 + bottomPad),
+                SizedBox(height: 10 + bottomPad),
               ]),
             ),
           ),
@@ -823,6 +976,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(height: 12),
                   _buildForceWidget(state, espIdx, selected, multiModules),
                   const SizedBox(height: 10),
+                  if (state.nomSonde2.isNotEmpty) ...[
+                    _buildSecondeSonde(state),
+                    const SizedBox(height: 10),
+                  ],
                   _buildStatus(state),
                 ],
               ),
@@ -1374,7 +1531,7 @@ class _ForceBtn extends StatelessWidget {
 class ConfigSheet extends StatefulWidget {
   final List<EspConfig> currentConfigs;
   final String currentOrientation;
-  final void Function(List<EspConfig>, String) onSave;
+  final Future<void> Function(List<EspConfig>, String) onSave;
   const ConfigSheet({
     super.key,
     required this.currentConfigs,
@@ -1561,7 +1718,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: () {
+                onPressed: () async {
                   final configs = _ctrls.map((m) {
                     var url = m['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
                     if (url.isNotEmpty && !url.startsWith('http')) url = 'http://$url';
@@ -1573,7 +1730,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       password: m['pwd']!.text.trim(),
                     );
                   }).toList();
-                  widget.onSave(configs, _orientation);
+                  await widget.onSave(configs, _orientation);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
