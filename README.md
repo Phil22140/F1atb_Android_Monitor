@@ -22,6 +22,8 @@ v2.5.1 - prise en charge des Relais SSR & Multi Modules pour le forçage individ
 
 v2.6.2 - Prise en charge l'orientation Smartphone/Tablette avec possibilité de figer en Portrait ou Paysage & Info version RMS
 
+v3.0.2 - Prise en charge de plusieurs EPS en multipage
+
 
 --------
 
