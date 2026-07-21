@@ -20,7 +20,7 @@ v2.4.1 - correction alignement affichage capteurs
 
 v2.5.1 - prise en charge des Relais SSR & Multi Modules pour le forçage individuel
 
-v2.6.2 - Prise en charge l'orientation Smartphone/Tablette avec possibilité de figé en Portrait ou Paysage & Info version RMS
+v2.6.2 - Prise en charge l'orientation Smartphone/Tablette avec possibilité de figer en Portrait ou Paysage & Info version RMS
 
 
 --------
