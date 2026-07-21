@@ -28,16 +28,12 @@ Future<String> simpleGet(String url, {String? cookie}) async {
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
   runApp(const ChauffeEauApp());
 }
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '2.5.1';
+const String appVersion = '2.6.2';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -191,6 +187,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   String _esp32Url = '';
   String _password = '';
+  String _orientationMode = 'auto'; // 'portrait', 'auto', 'landscape'
+  String? _routerVersion;
   List<ModuleData> _modules = [];
   int? _selectedNumAction; // module sélectionné quand plusieurs modules (null = aucun)
   List<CapteurInfo> _capteursInfo = List.generate(4, (i) => const CapteurInfo(nom: '', actif: false));
@@ -217,20 +215,47 @@ class _HomeScreenState extends State<HomeScreen> {
     final prefs = await SharedPreferences.getInstance();
     final url = prefs.getString('esp32_url') ?? '';
     final pwd = prefs.getString('esp32_pwd') ?? '';
+    final orientation = prefs.getString('orientation_mode') ?? 'auto';
     if (url.isNotEmpty) {
-      setState(() { _esp32Url = url; _password = pwd; });
+      setState(() {
+        _esp32Url = url;
+        _password = pwd;
+        _orientationMode = orientation;
+      });
+      _applyOrientation(orientation);
       _startPolling();
     } else {
       _showConfig();
     }
   }
 
-  Future<void> _saveConfig(String url, String pwd) async {
+  Future<void> _saveConfig(String url, String pwd, String orientation) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('esp32_url', url);
     await prefs.setString('esp32_pwd', pwd);
-    setState(() { _esp32Url = url; _password = pwd; });
+    await prefs.setString('orientation_mode', orientation);
+    setState(() { _esp32Url = url; _password = pwd; _orientationMode = orientation; });
+    _applyOrientation(orientation);
     _startPolling();
+  }
+
+  void _applyOrientation(String mode) {
+    switch (mode) {
+      case 'portrait':
+        SystemChrome.setPreferredOrientations([
+          DeviceOrientation.portraitUp,
+          DeviceOrientation.portraitDown,
+        ]);
+        break;
+      case 'landscape':
+        SystemChrome.setPreferredOrientations([
+          DeviceOrientation.landscapeLeft,
+          DeviceOrientation.landscapeRight,
+        ]);
+        break;
+      default: // 'auto'
+        SystemChrome.setPreferredOrientations([]);
+    }
   }
 
   void _startPolling() {
@@ -247,7 +272,17 @@ class _HomeScreenState extends State<HomeScreen> {
       final body = await simpleGet('$base/ParaFixe', cookie: cookie)
           .timeout(const Duration(seconds: 8));
       final infos = parseCapteursInfo(body);
-      if (mounted) setState(() => _capteursInfo = infos);
+      // Version du firmware routeur F1ATB : VersionStocke / 100 → ex: 1720 → "17.20"
+      String? routerVer;
+      try {
+        final data = jsonDecode(body) as Map<String, dynamic>;
+        final v = int.tryParse(data['VersionStocke']?.toString() ?? '');
+        if (v != null) routerVer = (v / 100).toStringAsFixed(2);
+      } catch (_) {}
+      if (mounted) setState(() {
+        _capteursInfo = infos;
+        _routerVersion = routerVer;
+      });
     } catch (_) {
       // pas bloquant : sans ces infos, les capteurs ne s'affichent simplement pas
     }
@@ -320,28 +355,141 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => ConfigSheet(
         currentUrl: _esp32Url,
         currentPwd: _password,
-        onSave: (url, pwd) {
+        currentOrientation: _orientationMode,
+        onSave: (url, pwd, orientation) {
           Navigator.pop(context);
-          _saveConfig(url, pwd);
+          _saveConfig(url, pwd, orientation);
         },
       ),
     );
   }
 
+  // ── Blocs partagés portrait / paysage ─────────────────────────────────────────
+
+  Widget _buildHeader({required bool compact, required double imageHeight}) {
+    if (compact) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: SizedBox(
+                width: imageHeight, height: imageHeight,
+                child: Image.asset('assets/icon.png', fit: BoxFit.cover),
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text('F1ATB MONITOR',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                      letterSpacing: 2.0, color: Color(0xFF5A6278))),
+            ),
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: SizedBox(
+          width: double.infinity, height: imageHeight,
+          child: Image.asset('assets/icon.png', fit: BoxFit.contain),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGauges({required bool multiModules, required bool compact}) {
+    if (!multiModules) {
+      return GaugeWidget(
+        value: _modules.isNotEmpty ? (_modules.first.ouverture ?? 0) : 0,
+        hasValue: _modules.isNotEmpty && _modules.first.ouverture != null,
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: ModulesGrid(
+        modules: _modules,
+        selectedNumAction: _selectedNumAction,
+        onSelect: _selectModule,
+      ),
+    );
+  }
+
+  Widget _buildEquiv({required bool multiModules}) {
+    if (!multiModules && _modules.isNotEmpty && _modules.first.heureEquiv != null) {
+      return Text(
+        'équivalent à ${_modules.first.heureEquiv} à 100%',
+        style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _buildPowerCards() {
+    return Row(
+      children: [
+        Expanded(child: PowerCard(label: 'Soutiré', value: _pws, color: const Color(0xFFF43F5E))),
+        const SizedBox(width: 10),
+        Expanded(child: PowerCard(label: 'Injecté', value: _pwi, color: const Color(0xFF22D3A8))),
+      ],
+    );
+  }
+
+  Widget _buildForceWidget(ModuleData? selected, bool multiModules) {
+    return IgnorePointer(
+      ignoring: multiModules && selected == null,
+      child: Opacity(
+        opacity: (multiModules && selected == null) ? 0.4 : 1.0,
+        child: ForceWidget(forcage: selected?.forcage ?? 0, onForce: _sendForce),
+      ),
+    );
+  }
+
+  Widget _buildStatus() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          width: 6, height: 6,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _ok ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E),
+            boxShadow: _ok ? [BoxShadow(
+                color: const Color(0xFF22D3A8).withOpacity(0.6), blurRadius: 6)] : null,
+          ),
+        ),
+        const SizedBox(width: 7),
+        Flexible(
+          child: Text(_statusTxt, textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace')),
+        ),
+        const SizedBox(width: 12),
+        Text(
+          _routerVersion != null
+              ? 'v$appVersion · RMS $_routerVersion'
+              : 'v$appVersion',
+          style: const TextStyle(fontSize: 11, color: Color(0xFF3A4258), fontFamily: 'monospace'),
+        ),
+      ],
+    );
+  }
+
+  // ── Build principal ────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     final capteursActifs = <int>[];
     for (var i = 0; i < 4; i++) {
-      if (_capteursInfo[i].actif && _temperatures[i] != null) {
-        capteursActifs.add(i);
-      }
+      if (_capteursInfo[i].actif && _temperatures[i] != null) capteursActifs.add(i);
     }
     final hasCapteurs = capteursActifs.isNotEmpty;
     final multiModules = _modules.length > 1;
-    final compactHeader = hasCapteurs || multiModules; // mode mini-image + titre
-    final imageHeight = compactHeader ? 100.0 : 150.0;
+    final compactHeader = hasCapteurs || multiModules;
 
-    // Module actuellement sélectionné (pour le widget de forçage)
     ModuleData? selected;
     if (_selectedNumAction != null) {
       for (final m in _modules) {
@@ -350,222 +498,200 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     return Scaffold(
-      body: Stack(
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Bandeau image en haut, sous la barre de statut
-              SafeArea(
-                bottom: false,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-                  child: compactHeader
-                  // Layout compact : image à gauche + texte centré à droite
-                      ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
+      body: _orientationMode == 'portrait'
+          ? _buildPortrait(
+          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+          multiModules: multiModules, compactHeader: compactHeader, selected: selected)
+          : _orientationMode == 'landscape'
+          ? _buildLandscape(
+          capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+          multiModules: multiModules, selected: selected)
+          : OrientationBuilder(
+        builder: (context, orientation) {
+          if (orientation == Orientation.landscape) {
+            return _buildLandscape(
+                capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+                multiModules: multiModules, selected: selected);
+          }
+          return _buildPortrait(
+              capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
+              multiModules: multiModules, compactHeader: compactHeader,
+              selected: selected);
+        },
+      ),
+    );
+  }
+
+  // ── Layout Portrait ────────────────────────────────────────────────────────────
+  Widget _buildPortrait({
+    required List<int> capteursActifs,
+    required bool hasCapteurs,
+    required bool multiModules,
+    required bool compactHeader,
+    required ModuleData? selected,
+  }) {
+    final imageHeight = compactHeader ? 100.0 : 150.0;
+
+    return Stack(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                child: _buildHeader(compact: compactHeader, imageHeight: imageHeight),
+              ),
+            ),
+            Expanded(
+              child: SafeArea(
+                top: false,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: SizedBox(
-                          width: imageHeight,
-                          height: imageHeight,
-                          child: Image.asset(
-                            'assets/icon.png',
-                            fit: BoxFit.cover,
+                      SizedBox(height: compactHeader ? 2 : 20),
+                      if (!compactHeader) ...[
+                        const Text('F1ATB MONITOR',
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                letterSpacing: 2.5, color: Color(0xFF5A6278))),
+                        const SizedBox(height: 24),
+                      ],
+                      _buildGauges(multiModules: multiModules, compact: compactHeader),
+                      SizedBox(height: compactHeader ? 2 : 8),
+                      _buildEquiv(multiModules: multiModules),
+                      SizedBox(height: compactHeader ? 6 : 16),
+                      if (hasCapteurs) ...[
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24),
+                          child: CapteursRow(
+                            indices: capteursActifs, infos: _capteursInfo,
+                            temperatures: _temperatures,
                           ),
                         ),
+                        const SizedBox(height: 10),
+                      ],
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: _buildPowerCards(),
                       ),
-                      const SizedBox(width: 16),
-                      const Expanded(
-                        child: Text(
-                          'F1ATB MONITOR',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: 2.0,
-                            color: Color(0xFF5A6278),
-                          ),
-                        ),
+                      SizedBox(height: compactHeader ? 12 : 18),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: _buildForceWidget(selected, multiModules),
                       ),
+                      SizedBox(height: compactHeader ? 10 : 14),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: _buildStatus(),
+                      ),
+                      SizedBox(height: compactHeader ? 10 : 16),
                     ],
-                  )
-                  // Layout standard : image pleine largeur
-                      : ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: SizedBox(
-                      width: double.infinity,
-                      height: imageHeight,
-                      child: Image.asset(
-                        'assets/icon.png',
-                        fit: BoxFit.contain,
-                      ),
-                    ),
                   ),
                 ),
               ),
+            ),
+          ],
+        ),
+        // Bouton config
+        SafeArea(
+          bottom: false,
+          child: Align(
+            alignment: Alignment.topRight,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
+              child: _configButton(),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Layout Paysage ─────────────────────────────────────────────────────────────
+  Widget _buildLandscape({
+    required List<int> capteursActifs,
+    required bool hasCapteurs,
+    required bool multiModules,
+    required ModuleData? selected,
+  }) {
+    return SafeArea(
+      child: Stack(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ── Colonne gauche : header + jauge(s) + équivalence ──────────────
               Expanded(
-                child: SafeArea(
-                  top: false,
-                  child: Center(
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(height: compactHeader ? 2 : 20),
-                          if (!compactHeader) ...[
-                            const Text(
-                              'F1ATB MONITOR',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 2.5,
-                                color: Color(0xFF5A6278),
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                          ],
-                          // Jauge(s) : une seule grande jauge, ou une grille si plusieurs modules
-                          if (!multiModules)
-                            GaugeWidget(
-                              value: _modules.isNotEmpty ? (_modules.first.ouverture ?? 0) : 0,
-                              hasValue: _modules.isNotEmpty && _modules.first.ouverture != null,
-                            )
-                          else
-                            Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 16),
-                              child: ModulesGrid(
-                                modules: _modules,
-                                selectedNumAction: _selectedNumAction,
-                                onSelect: _selectModule,
-                              ),
-                            ),
-                          SizedBox(height: compactHeader ? 2 : 8),
-                          // Équivalence heure (mode mono-module uniquement)
-                          if (!multiModules && _modules.isNotEmpty && _modules.first.heureEquiv != null)
-                            Text(
-                              'équivalent à ${_modules.first.heureEquiv} à 100%',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: Color(0xFF5A6278),
-                                fontFamily: 'monospace',
-                              ),
-                            ),
-                          SizedBox(height: compactHeader ? 6 : 16),
-                          if (hasCapteurs)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 24),
-                              child: CapteursRow(
-                                indices: capteursActifs,
-                                infos: _capteursInfo,
-                                temperatures: _temperatures,
-                              ),
-                            ),
-                          if (hasCapteurs) const SizedBox(height: 10),
-                          // Cards puissance
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: Row(
-                              children: [
-                                Expanded(child: PowerCard(
-                                  label: 'Soutiré',
-                                  value: _pws,
-                                  color: const Color(0xFFF43F5E),
-                                )),
-                                const SizedBox(width: 10),
-                                Expanded(child: PowerCard(
-                                  label: 'Injecté',
-                                  value: _pwi,
-                                  color: const Color(0xFF22D3A8),
-                                )),
-                              ],
-                            ),
-                          ),
-                          SizedBox(height: compactHeader ? 12 : 18),
-                          // Widget forçage — grisé/inactif tant qu'aucun module sélectionné
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: IgnorePointer(
-                              ignoring: multiModules && selected == null,
-                              child: Opacity(
-                                opacity: (multiModules && selected == null) ? 0.4 : 1.0,
-                                child: ForceWidget(
-                                  forcage: selected?.forcage ?? 0,
-                                  onForce: _sendForce,
-                                ),
-                              ),
-                            ),
-                          ),
-                          SizedBox(height: compactHeader ? 10 : 14),
-                          // Statut
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                AnimatedContainer(
-                                  duration: const Duration(milliseconds: 300),
-                                  width: 6, height: 6,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: _ok ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E),
-                                    boxShadow: _ok ? [BoxShadow(
-                                      color: const Color(0xFF22D3A8).withOpacity(0.6),
-                                      blurRadius: 6,
-                                    )] : null,
-                                  ),
-                                ),
-                                const SizedBox(width: 7),
-                                Flexible(
-                                  child: Text(_statusTxt,
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      fontSize: 11, color: Color(0xFF5A6278),
-                                      fontFamily: 'monospace',
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                const Text(
-                                  'v$appVersion',
-                                  style: TextStyle(
-                                    fontSize: 11, color: Color(0xFF3A4258),
-                                    fontFamily: 'monospace',
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          SizedBox(height: compactHeader ? 10 : 16),
-                        ],
-                      ),
-                    ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(height: 8),
+                      _buildHeader(compact: true, imageHeight: 60),
+                      const SizedBox(height: 8),
+                      _buildGauges(multiModules: multiModules, compact: true),
+                      const SizedBox(height: 4),
+                      _buildEquiv(multiModules: multiModules),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+              ),
+              // Séparateur vertical discret
+              Container(
+                width: 0.5,
+                color: Colors.white.withOpacity(0.07),
+              ),
+              // ── Colonne droite : capteurs + puissances + forçage + statut ─────
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (hasCapteurs) ...[
+                        CapteursRow(
+                          indices: capteursActifs, infos: _capteursInfo,
+                          temperatures: _temperatures,
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                      _buildPowerCards(),
+                      const SizedBox(height: 12),
+                      _buildForceWidget(selected, multiModules),
+                      const SizedBox(height: 10),
+                      _buildStatus(),
+                    ],
                   ),
                 ),
               ),
             ],
           ),
-          // Bouton config
-          SafeArea(
-            bottom: false,
-            child: Align(
-              alignment: Alignment.topRight,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.3),
-                    shape: BoxShape.circle,
-                  ),
-                  child: IconButton(
-                    onPressed: _showConfig,
-                    icon: const Icon(Icons.settings_outlined, color: Colors.white),
-                  ),
-                ),
-              ),
+          // Bouton config en paysage (coin haut-droit)
+          Align(
+            alignment: Alignment.topRight,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
+              child: _configButton(),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _configButton() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.3),
+        shape: BoxShape.circle,
+      ),
+      child: IconButton(
+        onPressed: _showConfig,
+        icon: const Icon(Icons.settings_outlined, color: Colors.white),
       ),
     );
   }
@@ -1102,8 +1228,15 @@ class _ForceBtn extends StatelessWidget {
 class ConfigSheet extends StatefulWidget {
   final String currentUrl;
   final String currentPwd;
-  final void Function(String url, String pwd) onSave;
-  const ConfigSheet({super.key, required this.currentUrl, required this.currentPwd, required this.onSave});
+  final String currentOrientation;
+  final void Function(String url, String pwd, String orientation) onSave;
+  const ConfigSheet({
+    super.key,
+    required this.currentUrl,
+    required this.currentPwd,
+    required this.currentOrientation,
+    required this.onSave,
+  });
 
   @override
   State<ConfigSheet> createState() => _ConfigSheetState();
@@ -1112,12 +1245,14 @@ class ConfigSheet extends StatefulWidget {
 class _ConfigSheetState extends State<ConfigSheet> {
   late TextEditingController _urlCtrl;
   late TextEditingController _pwdCtrl;
+  late String _orientation;
 
   @override
   void initState() {
     super.initState();
     _urlCtrl = TextEditingController(text: widget.currentUrl);
     _pwdCtrl = TextEditingController(text: widget.currentPwd);
+    _orientation = widget.currentOrientation;
   }
 
   @override
@@ -1153,59 +1288,132 @@ class _ConfigSheetState extends State<ConfigSheet> {
         left: 24, right: 24, top: 24,
         bottom: MediaQuery.of(context).viewInsets.bottom + 24,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Configuration',
-              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                  letterSpacing: 2.5, color: Color(0xFF5A6278))),
-          const SizedBox(height: 16),
-          const Text('URL de l\'ESP32',
-              style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _urlCtrl,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            decoration: _inputDeco('http://192.168.1.X:PORT'),
-          ),
-          const SizedBox(height: 6),
-          const Text('Avec http:// et le port si nécessaire',
-              style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
-          const SizedBox(height: 16),
-          const Text('Mot de passe (optionnel)',
-              style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _pwdCtrl,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
-            obscureText: true,
-            autocorrect: false,
-            decoration: _inputDeco('Laisser vide si aucun'),
-          ),
-          const SizedBox(height: 6),
-          const Text('Requis pour le forçage ON/OFF',
-              style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () {
-                var url = _urlCtrl.text.trim().replaceAll(RegExp(r'/$'), '');
-                if (!url.startsWith('http')) url = 'http://$url';
-                widget.onSave(url, _pwdCtrl.text.trim());
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFF97316),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              child: const Text('Connecter', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Configuration',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                    letterSpacing: 2.5, color: Color(0xFF5A6278))),
+            const SizedBox(height: 16),
+            const Text('URL de l\'ESP32',
+                style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _urlCtrl,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              decoration: _inputDeco('http://192.168.1.X:PORT'),
             ),
-          ),
+            const SizedBox(height: 6),
+            const Text('Avec http:// et le port si nécessaire',
+                style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+            const SizedBox(height: 16),
+            const Text('Mot de passe (optionnel)',
+                style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _pwdCtrl,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Color(0xFFE8EAF0)),
+              obscureText: true,
+              autocorrect: false,
+              decoration: _inputDeco('Laisser vide si aucun'),
+            ),
+            const SizedBox(height: 6),
+            const Text('Requis pour le forçage ON/OFF',
+                style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+            const SizedBox(height: 16),
+            const Text('Orientation',
+                style: TextStyle(fontSize: 13, color: Color(0xFF5A6278))),
+            const SizedBox(height: 8),
+            _OrientationToggle(
+              value: _orientation,
+              onChanged: (v) => setState(() => _orientation = v),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () {
+                  var url = _urlCtrl.text.trim().replaceAll(RegExp(r'/$'), '');
+                  if (!url.startsWith('http')) url = 'http://$url';
+                  widget.onSave(url, _pwdCtrl.text.trim(), _orientation);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFF97316),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Connecter',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),  // SingleChildScrollView
+      ),
+    );
+  }
+}
+
+// ── Toggle 3 positions pour l'orientation ──────────────────────────────────────
+class _OrientationToggle extends StatelessWidget {
+  final String value; // 'portrait', 'auto', 'landscape'
+  final void Function(String) onChanged;
+  const _OrientationToggle({required this.value, required this.onChanged});
+
+  static const _options = [
+    ('portrait',  '⬆ Portrait'),
+    ('auto',      '⟳ Auto'),
+    ('landscape', '⮕ Paysage'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0A0F1A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < _options.length; i++) ...[
+            Expanded(
+              child: GestureDetector(
+                onTap: () => onChanged(_options[i].$1),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(
+                    color: value == _options[i].$1
+                        ? const Color(0xFFF97316)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.horizontal(
+                      left: i == 0 ? const Radius.circular(11) : Radius.zero,
+                      right: i == _options.length - 1
+                          ? const Radius.circular(11) : Radius.zero,
+                    ),
+                  ),
+                  child: Text(
+                    _options[i].$2,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: value == _options[i].$1
+                          ? Colors.white
+                          : const Color(0xFF5A6278),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (i < _options.length - 1)
+              Container(width: 0.5, height: 36, color: Colors.white.withOpacity(0.08)),
+          ],
         ],
       ),
     );
