@@ -28,6 +28,8 @@ v3.3.0 - Prise en charge seconde sonde si déclarée & corrections bug sauvegard
 
 v3.3.1 - Masquage 2e sonde si Source=Ext ou ShellyPro
 
+v3.4.5 - Gestion Mode Page unique/Multi ESP, Choix des jauges affichée & test connexion aux ESP dans Config
+
 
 --------
 
