@@ -34,7 +34,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.4.5';
+const String appVersion = '3.4.7';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -187,12 +187,12 @@ class EspConfig {
   final String name;
   final String url;
   final String password;
-  final List<int> enabledNumActions; // vide = tout afficher
+  final List<int>? enabledNumActions; // null=tout afficher, []=aucune, [0,1]=filtrés
   const EspConfig({
     required this.name,
     required this.url,
     required this.password,
-    this.enabledNumActions = const [],
+    this.enabledNumActions,
   });
 }
 
@@ -328,7 +328,9 @@ class _HomeScreenState extends State<HomeScreen> {
             name:               (c['name'] as String?) ?? 'ESP',
             url:                (c['url']  as String?) ?? '',
             password:           (c['pwd']  as String?) ?? '',
-            enabledNumActions:  (c['enabled'] as List?)?.cast<int>() ?? const [],
+            enabledNumActions:  c.containsKey('enabled')
+                ? (c['enabled'] as List?)?.cast<int>()
+                : null,
           ));
         }
       }
@@ -347,7 +349,9 @@ class _HomeScreenState extends State<HomeScreen> {
               name:              (c['name'] as String?) ?? 'ESP',
               url:               (c['url']  as String?) ?? '',
               password:          (c['pwd']  as String?) ?? '',
-              enabledNumActions: (c['enabled'] as List?)?.cast<int>() ?? const [],
+              enabledNumActions: c.containsKey('enabled')
+                  ? (c['enabled'] as List?)?.cast<int>()
+                  : null,
             ));
           }
         }
@@ -414,11 +418,16 @@ class _HomeScreenState extends State<HomeScreen> {
       final content = jsonEncode({
         'orientation':  orientation,
         'display_mode': _displayMode,
-        'configs': configs.map((c) => {
-          'name':    c.name,
-          'url':     c.url,
-          'pwd':     c.password,
-          'enabled': c.enabledNumActions,
+        'configs': configs.map((c) {
+          final map = <String, dynamic>{
+            'name': c.name,
+            'url':  c.url,
+            'pwd':  c.password,
+          };
+          // N'inclure 'enabled' que si configuré explicitement
+          // (null = pas de test = tout afficher → clé absente dans le JSON)
+          if (c.enabledNumActions != null) map['enabled'] = c.enabledNumActions;
+          return map;
         }).toList(),
       });
       await file.writeAsString(content, flush: true); // flush=true force l'écriture disque
@@ -603,9 +612,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (i >= _espStates.length) continue;
       final cfg   = _espConfigs[i];
       final state = _espStates[i];
-      final visible = cfg.enabledNumActions.isEmpty
+      final visible = cfg.enabledNumActions == null
           ? state.modules
-          : state.modules.where((m) => cfg.enabledNumActions.contains(m.numAction)).toList();
+          : state.modules.where((m) => cfg.enabledNumActions!.contains(m.numAction)).toList();
       for (final m in visible) {
         result.add(ModuleData(
           numAction:  i * 1000 + m.numAction, // ID encodé unique
@@ -699,6 +708,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildGauges(EspState state, int espIdx,
       {required List<ModuleData> modules}) {
+    if (modules.isEmpty) return const SizedBox.shrink();
     if (modules.length <= 1) {
       return GaugeWidget(
         value: modules.isNotEmpty ? (modules.first.ouverture ?? 0) : 0,
@@ -930,10 +940,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final fakeCfg = EspConfig(name: 'F1ATB Monitor', url: '', password: '');
 
     // Blocs partagés
-    Widget gauges = !multiMod
+    Widget gauges = combined.isEmpty
+        ? const SizedBox.shrink()
+        : !multiMod
         ? GaugeWidget(
-      value: combined.isNotEmpty ? (combined.first.ouverture ?? 0) : 0,
-      hasValue: combined.isNotEmpty && combined.first.ouverture != null,
+      value: combined.first.ouverture ?? 0,
+      hasValue: combined.first.ouverture != null,
     )
         : Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1089,9 +1101,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final state = _espStates[idx];
 
     // Filtrer les modules selon les préférences d'affichage
-    final visibleModules = cfg.enabledNumActions.isEmpty
+    final visibleModules = cfg.enabledNumActions == null
         ? state.modules
-        : state.modules.where((m) => cfg.enabledNumActions.contains(m.numAction)).toList();
+        : state.modules.where((m) => cfg.enabledNumActions!.contains(m.numAction)).toList();
 
     // Portrait → toujours compact (image à gauche, titre à droite)
     final multiModules  = visibleModules.length > 1;
@@ -1958,15 +1970,17 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
       final modules = parseActionneurs(response);
       // Récupère les modules déjà configurés pour cet ESP
+      // null = pas encore configuré = tout cocher par défaut
       final existingEnabled = idx < widget.currentConfigs.length
           ? widget.currentConfigs[idx].enabledNumActions
-          : <int>[];
+          : null; // null → tout afficher par défaut
 
       setState(() {
         _testedModules[idx] = modules.map((m) => _ModuleChoice(
           numAction: m.numAction,
           nom:       m.nom,
-          enabled:   existingEnabled.isEmpty || existingEnabled.contains(m.numAction),
+          // null → tout coché ; [] → tout décoché ; liste → selon la liste
+          enabled:   existingEnabled == null || existingEnabled.contains(m.numAction),
         )).toList();
         _testing[idx] = false;
       });
@@ -2197,17 +2211,22 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     var url   = m['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
                     if (url.isNotEmpty && !url.startsWith('http')) url = 'http://$url';
                     // Détermine les modules activés
-                    List<int> enabled;
+                    List<int>? enabled;
                     final tested = _testedModules[i];
                     if (tested != null && tested.isNotEmpty) {
-                      // Test réussi → utilise les checkboxes
+                      // Test réussi → utilise les checkboxes (peut être [] si tout décoché)
                       enabled = tested.where((m) => m.enabled)
                           .map((m) => m.numAction).toList();
-                    } else {
-                      // Non testé ou échec → conserve l'existant
+                    } else if (tested != null && tested.isEmpty) {
+                      // Test échoué → conserve l'existant
                       enabled = i < widget.currentConfigs.length
                           ? widget.currentConfigs[i].enabledNumActions
-                          : const [];
+                          : null;
+                    } else {
+                      // Non testé → conserve l'existant (null=tout afficher)
+                      enabled = i < widget.currentConfigs.length
+                          ? widget.currentConfigs[i].enabledNumActions
+                          : null;
                     }
                     return EspConfig(
                       name: m['name']!.text.trim().isEmpty
