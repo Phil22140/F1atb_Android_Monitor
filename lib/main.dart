@@ -34,7 +34,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.5.3';
+const String appVersion = '3.5.4';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -187,12 +187,14 @@ class EspConfig {
   final String name;
   final String url;
   final String password;
-  final List<int>? enabledNumActions; // null=tout afficher, []=aucune, [0,1]=filtrés
+  final List<int>? enabledNumActions;   // null=tout afficher, []=aucune, [0,1]=filtrés
+  final List<int>? enabledTempIndices;  // null=tout afficher, []=aucun, [0,2]=filtrés
   const EspConfig({
     required this.name,
     required this.url,
     required this.password,
     this.enabledNumActions,
+    this.enabledTempIndices,
   });
 }
 
@@ -333,6 +335,9 @@ class _HomeScreenState extends State<HomeScreen> {
             enabledNumActions:  c.containsKey('enabled')
                 ? (c['enabled'] as List?)?.cast<int>()
                 : null,
+            enabledTempIndices: c.containsKey('enabled_temps')
+                ? (c['enabled_temps'] as List?)?.cast<int>()
+                : null,
           ));
         }
       }
@@ -353,6 +358,9 @@ class _HomeScreenState extends State<HomeScreen> {
               password:          (c['pwd']  as String?) ?? '',
               enabledNumActions: c.containsKey('enabled')
                   ? (c['enabled'] as List?)?.cast<int>()
+                  : null,
+              enabledTempIndices: c.containsKey('enabled_temps')
+                  ? (c['enabled_temps'] as List?)?.cast<int>()
                   : null,
             ));
           }
@@ -431,7 +439,8 @@ class _HomeScreenState extends State<HomeScreen> {
           };
           // N'inclure 'enabled' que si configuré explicitement
           // (null = pas de test = tout afficher → clé absente dans le JSON)
-          if (c.enabledNumActions != null) map['enabled'] = c.enabledNumActions;
+          if (c.enabledNumActions  != null) map['enabled']       = c.enabledNumActions;
+          if (c.enabledTempIndices != null) map['enabled_temps'] = c.enabledTempIndices;
           return map;
         }).toList(),
       });
@@ -945,7 +954,9 @@ class _HomeScreenState extends State<HomeScreen> {
       for (var j = 0; j < 4; j++) {
         if (state.capteursInfo.length > j && state.capteursInfo[j].actif &&
             state.temperatures.length > j && state.temperatures[j] != null) {
-          actifs.add(j);
+          final enabled = _espConfigs[i].enabledTempIndices == null ||
+              _espConfigs[i].enabledTempIndices!.contains(j);
+          if (enabled) actifs.add(j);
         }
       }
       if (actifs.isEmpty) continue;
@@ -1173,7 +1184,10 @@ class _HomeScreenState extends State<HomeScreen> {
     for (var i = 0; i < 4; i++) {
       if (state.capteursInfo.length > i && state.capteursInfo[i].actif &&
           state.temperatures.length > i && state.temperatures[i] != null) {
-        capteursActifs.add(i);
+        // Filtrer selon enabledTempIndices (null=tout, []=aucun, liste=filtrés)
+        final enabled = cfg.enabledTempIndices == null ||
+            cfg.enabledTempIndices!.contains(i);
+        if (enabled) capteursActifs.add(i);
       }
     }
     final hasCapteurs  = capteursActifs.isNotEmpty;
@@ -1929,6 +1943,13 @@ class _ModuleChoice {
   _ModuleChoice({required this.numAction, required this.nom, required this.enabled});
 }
 
+class _TempChoice {
+  final int index;    // 0-3
+  final String nom;
+  bool enabled;
+  _TempChoice({required this.index, required this.nom, required this.enabled});
+}
+
 // ── Feuille de config multi-ESP ────────────────────────────────────────────────
 class ConfigSheet extends StatefulWidget {
   final List<EspConfig> currentConfigs;
@@ -1958,6 +1979,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
   // État du test de connexion par ESP
   late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
+  late List<List<_TempChoice>?>   _testedTemps;   // null=non testé, []= aucun capteur
   late List<bool> _testing;
 
   @override
@@ -1973,6 +1995,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       'pwd':  TextEditingController(text: c.password),
     }).toList();
     _testedModules = List.generate(_count, (_) => null);
+    _testedTemps   = List.generate(_count, (_) => null);
     _testing       = List.generate(_count, (_) => false);
 
     // Auto-test au chargement pour les ESPs déjà configurés (URL présente)
@@ -2005,6 +2028,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
         'pwd':  TextEditingController(),
       });
       _testedModules.add(null);
+      _testedTemps.add(null);
       _testing.add(false);
     });
   }
@@ -2015,6 +2039,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       final last = _ctrls.removeLast();
       last.values.forEach((c) => c.dispose());
       _testedModules.removeLast();
+      _testedTemps.removeLast();
       _testing.removeLast();
       _count--;
     });
@@ -2029,31 +2054,48 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
     setState(() => _testing[idx] = true);
     try {
-      final response = await simpleGet(
-        '$url/ajax_etatActions?Force=0&NumAction=0',
-        cookie: cookie,
-      ).timeout(const Duration(seconds: 8));
+      // Fetch jauges ET capteurs en parallèle
+      final results = await Future.wait([
+        simpleGet('$url/ajax_etatActions?Force=0&NumAction=0', cookie: cookie),
+        simpleGet('$url/ParaFixe', cookie: cookie),
+      ]).timeout(const Duration(seconds: 8));
 
-      final modules = parseActionneurs(response);
-      // Récupère les modules déjà configurés pour cet ESP
-      // null = pas encore configuré = tout cocher par défaut
+      final modules  = parseActionneurs(results[0]);
+      final capteurs = parseCapteursInfo(results[1]);
+
       final existingEnabled = idx < widget.currentConfigs.length
           ? widget.currentConfigs[idx].enabledNumActions
-          : null; // null → tout afficher par défaut
+          : null;
+      final existingTemps = idx < widget.currentConfigs.length
+          ? widget.currentConfigs[idx].enabledTempIndices
+          : null;
+
+      // Capteurs actifs uniquement
+      final tempChoices = <_TempChoice>[];
+      for (var j = 0; j < capteurs.length; j++) {
+        if (capteurs[j].actif) {
+          tempChoices.add(_TempChoice(
+            index:   j,
+            nom:     capteurs[j].nom,
+            enabled: existingTemps == null || existingTemps.contains(j),
+          ));
+        }
+      }
 
       setState(() {
         _testedModules[idx] = modules.map((m) => _ModuleChoice(
           numAction: m.numAction,
           nom:       m.nom,
-          // null → tout coché ; [] → tout décoché ; liste → selon la liste
           enabled:   existingEnabled == null || existingEnabled.contains(m.numAction),
         )).toList();
+        _testedTemps[idx] = tempChoices;
         _testing[idx] = false;
       });
     } catch (_) {
       setState(() {
-        _testedModules[idx] = []; // liste vide = échec
-        _testing[idx] = false;
+        _testedModules[idx] = [];
+        _testedTemps[idx]   = [];
+        _testing[idx]       = false;
       });
     }
   }
@@ -2238,6 +2280,25 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       side: BorderSide(color: Colors.white.withOpacity(0.3)),
                       contentPadding: EdgeInsets.zero,
                     ),
+                  // ── Capteurs de température ──────────────────────────────
+                  if (_testedTemps[i] != null && _testedTemps[i]!.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    const Text('Capteurs de température',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                            letterSpacing: 1.2, color: Color(0xFF5A6278))),
+                    for (final t in _testedTemps[i]!)
+                      CheckboxListTile(
+                        value: t.enabled,
+                        onChanged: (v) => setState(() => t.enabled = v!),
+                        title: Text(t.nom,
+                            style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                        dense: true,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        activeColor: const Color(0xFFF97316),
+                        side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                  ],
                 ],
               ],
               const SizedBox(height: 16),
@@ -2314,12 +2375,28 @@ class _ConfigSheetState extends State<ConfigSheet> {
                           ? widget.currentConfigs[i].enabledNumActions
                           : null;
                     }
+                    // Détermine les capteurs température activés
+                    List<int>? enabledTemps;
+                    final testedT = _testedTemps[i];
+                    if (testedT != null && testedT.isNotEmpty) {
+                      enabledTemps = testedT.where((t) => t.enabled)
+                          .map((t) => t.index).toList();
+                    } else if (testedT != null && testedT.isEmpty) {
+                      enabledTemps = i < widget.currentConfigs.length
+                          ? widget.currentConfigs[i].enabledTempIndices
+                          : null;
+                    } else {
+                      enabledTemps = i < widget.currentConfigs.length
+                          ? widget.currentConfigs[i].enabledTempIndices
+                          : null;
+                    }
                     return EspConfig(
                       name: m['name']!.text.trim().isEmpty
                           ? 'ESP ${i + 1}' : m['name']!.text.trim(),
                       url: url,
                       password: m['pwd']!.text.trim(),
-                      enabledNumActions: enabled,
+                      enabledNumActions:  enabled,
+                      enabledTempIndices: enabledTemps,
                     );
                   }).toList();
                   await widget.onSave(configs, _orientation, _displayMode, _multiSites);
