@@ -34,7 +34,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.4.7';
+const String appVersion = '3.5.3';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -282,6 +282,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<EspState>  _espStates  = [];
   String _orientationMode = 'auto';
   String _displayMode     = 'multi'; // 'multi' | 'single'
+  bool   _multiSites      = false;   // false=site unique, true=multisites
   int _currentPage = 0;
   int? _singleSelectedId;  // encodé : espIdx * 1000 + numAction
   late PageController _pageController;
@@ -322,6 +323,7 @@ class _HomeScreenState extends State<HomeScreen> {
         orientation   = (data['orientation'] as String?) ?? 'auto';
         final dm      = (data['display_mode'] as String?) ?? 'multi';
         _displayMode  = dm;
+        _multiSites   = (data['multi_sites'] as bool?) ?? false;
         final list    = (data['configs'] as List).cast<Map<String, dynamic>>();
         for (final c in list) {
           configs.add(EspConfig(
@@ -410,14 +412,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _saveConfig(List<EspConfig> configs, String orientation, String displayMode) async {
+  Future<void> _saveConfig(List<EspConfig> configs, String orientation,
+      String displayMode, bool multiSites) async {
     _displayMode = displayMode;
+    _multiSites  = multiSites;
     // ── Sauvegarde dans un fichier JSON (synchrone = garanti sur disque) ───
     try {
       final file    = await _configFile;
       final content = jsonEncode({
         'orientation':  orientation,
         'display_mode': _displayMode,
+        'multi_sites':  _multiSites,
         'configs': configs.map((c) {
           final map = <String, dynamic>{
             'name': c.name,
@@ -664,8 +669,9 @@ class _HomeScreenState extends State<HomeScreen> {
             : [const EspConfig(name: 'F1ATB Monitor', url: '', password: '')],
         currentOrientation: _orientationMode,
         currentDisplayMode: _displayMode,
-        onSave: (configs, orientation, displayMode) async {
-          await _saveConfig(configs, orientation, displayMode);
+        currentMultiSites:  _multiSites,
+        onSave: (configs, orientation, displayMode, multiSites) async {
+          await _saveConfig(configs, orientation, displayMode, multiSites);
           if (mounted) Navigator.pop(context);
         },
       ),
@@ -927,6 +933,49 @@ class _HomeScreenState extends State<HomeScreen> {
     ]);
   }
 
+  // Capteurs de température combinés pour tous les ESPs (mode page unique)
+  Widget _buildCombinedTemperatures() {
+    final sections = <Widget>[];
+
+    for (var i = 0; i < _espConfigs.length; i++) {
+      if (i >= _espStates.length) continue;
+      final state = _espStates[i];
+
+      final actifs = <int>[];
+      for (var j = 0; j < 4; j++) {
+        if (state.capteursInfo.length > j && state.capteursInfo[j].actif &&
+            state.temperatures.length > j && state.temperatures[j] != null) {
+          actifs.add(j);
+        }
+      }
+      if (actifs.isEmpty) continue;
+
+      sections.add(Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (sections.isNotEmpty) const SizedBox(height: 8),
+          // Nom de l'ESP (si plusieurs ESPs avec capteurs)
+          if (_espConfigs.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(_espConfigs[i].name.toUpperCase(),
+                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                      letterSpacing: 1.3, color: Color(0xFF5A6278))),
+            ),
+          CapteursRow(
+            indices: actifs,
+            infos: state.capteursInfo,
+            temperatures: state.temperatures,
+          ),
+        ],
+      ));
+    }
+
+    if (sections.isEmpty) return const SizedBox.shrink();
+    return Column(mainAxisSize: MainAxisSize.min, children: sections);
+  }
+
   Widget _buildSinglePageView() {
     final combined = _buildCombinedModules();
     final sel      = _getSingleSelected();
@@ -1015,9 +1064,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 gauges,
                 const SizedBox(height: 4),
                 equiv,
-                const SizedBox(height: 12),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: _buildCombinedPowerCards()),
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: _buildCombinedTemperatures(),
+                ),
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: _multiSites
+                      ? _buildCombinedPowerCards()
+                      : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
+                ),
                 const SizedBox(height: 12),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: forceW),
                 const SizedBox(height: 12),
@@ -1066,7 +1124,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _buildCombinedPowerCards(),
+                  _buildCombinedTemperatures(),
+                  const SizedBox(height: 8),
+                  _multiSites
+                      ? _buildCombinedPowerCards()
+                      : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
                   const SizedBox(height: 12),
                   forceW,
                   const SizedBox(height: 12),
@@ -1872,12 +1934,14 @@ class ConfigSheet extends StatefulWidget {
   final List<EspConfig> currentConfigs;
   final String currentOrientation;
   final String currentDisplayMode;
-  final Future<void> Function(List<EspConfig>, String, String) onSave;
+  final bool   currentMultiSites;
+  final Future<void> Function(List<EspConfig>, String, String, bool) onSave;
   const ConfigSheet({
     super.key,
     required this.currentConfigs,
     required this.currentOrientation,
     required this.currentDisplayMode,
+    required this.currentMultiSites,
     required this.onSave,
   });
 
@@ -1889,6 +1953,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late List<Map<String, TextEditingController>> _ctrls;
   late String _orientation;
   late String _displayMode;
+  late bool   _multiSites;
   late int _count;
 
   // État du test de connexion par ESP
@@ -1900,6 +1965,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     super.initState();
     _orientation = widget.currentOrientation;
     _displayMode = widget.currentDisplayMode;
+    _multiSites  = widget.currentMultiSites;
     _count = widget.currentConfigs.length;
     _ctrls = widget.currentConfigs.map((c) => {
       'name': TextEditingController(text: c.name),
@@ -2180,15 +2246,35 @@ class _ConfigSheetState extends State<ConfigSheet> {
               const SizedBox(height: 16),
             ],
 
-            // ── Affichage ────────────────────────────────────────────────────
-            const Text('Affichage',
-                style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
-            const SizedBox(height: 8),
-            _DisplayModeToggle(
-              value: _displayMode,
-              onChanged: (v) => setState(() => _displayMode = v),
-            ),
-            const SizedBox(height: 16),
+            // ── Affichage (uniquement si plusieurs ESP) ──────────────────────
+            if (_count > 1) ...[
+              const Text('Affichage',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              const SizedBox(height: 8),
+              _DisplayModeToggle(
+                value: _displayMode,
+                onChanged: (v) => setState(() => _displayMode = v),
+              ),
+              const SizedBox(height: 12),
+            ],
+
+            // ── Multisites (uniquement si plusieurs ESP en page unique) ──────
+            if (_count > 1 && _displayMode == 'single') ...[
+              CheckboxListTile(
+                value: _multiSites,
+                onChanged: (v) => setState(() => _multiSites = v!),
+                title: const Text('Multisites',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                subtitle: const Text(
+                    'Affiche le Soutiré/Injecté de chaque ESP séparément',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                activeColor: const Color(0xFFF97316),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              const SizedBox(height: 8),
+            ],
 
             // ── Orientation ──────────────────────────────────────────────────
             const Text('Orientation',
@@ -2236,7 +2322,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       enabledNumActions: enabled,
                     );
                   }).toList();
-                  await widget.onSave(configs, _orientation, _displayMode);
+                  await widget.onSave(configs, _orientation, _displayMode, _multiSites);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
