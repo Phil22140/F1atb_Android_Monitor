@@ -34,6 +34,8 @@ v3.4.7 - Correction de bug en cas d'absence de sélection de jauges
 
 v3.5.3 - Nouvelle gestion Mono/Multisites pour les puissances & Affichage Capteur T° en MonoPage
 
+v3.5.4 - Choix des capteurs de température à afficher
+
 
 --------
 
