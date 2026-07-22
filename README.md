@@ -30,6 +30,8 @@ v3.3.1 - Masquage 2e sonde si Source=Ext ou ShellyPro
 
 v3.4.5 - Gestion Mode Page unique/Multi ESP, Choix des jauges affichée & test connexion aux ESP dans Config
 
+v3.4.7 - Correction de bug en cas d'absence de sélection de jauges
+
 
 --------
 
