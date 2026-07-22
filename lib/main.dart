@@ -34,7 +34,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.3.0';
+const String appVersion = '3.3.1';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -477,6 +477,9 @@ class _HomeScreenState extends State<HomeScreen> {
         nomSonde2 = (data['nomSondeFixe']  ?? '').toString();
         nomPpos   = (data['nomSfixePpos']  ?? 'Soutiré').toString();
         nomPneg   = (data['nomSfixePneg']  ?? 'Injecté').toString();
+        // Source sans sonde fixe (triphasé, compteur externe...) → pas de 2e sonde
+        final source = (data['Source'] ?? '').toString();
+        if (source == 'Ext' || source == 'ShellyPro') nomSonde2 = '';
       } catch (_) {}
       if (mounted) setState(() {
         _espStates[idx] = _espStates[idx].copyWith(
