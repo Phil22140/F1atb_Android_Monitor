@@ -32,7 +32,7 @@ v3.4.5 - Gestion Mode Page unique/Multi ESP, Choix des jauges affichée & test c
 
 v3.4.7 - Correction de bug en cas d'absence de sélection de jauges
 
-v3.5.3 - Nouvelle gestion Mono/Multisite pour les puissances & Affichage Capteur T° en MonoPage
+v3.5.3 - Nouvelle gestion Mono/Multisites pour les puissances & Affichage Capteur T° en MonoPage
 
 
 --------
