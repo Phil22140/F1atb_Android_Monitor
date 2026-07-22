@@ -26,6 +26,8 @@ v3.0.2 - Prise en charge de plusieurs EPS en multipage
 
 v3.3.0 - Prise en charge seconde sonde si déclarée & corrections bug sauvegarde multi ESP
 
+v3.3.1 - Masquage 2e sonde si Source=Ext ou ShellyPro
+
 
 --------
 
