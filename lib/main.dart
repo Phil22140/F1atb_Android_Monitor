@@ -34,7 +34,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.3.1';
+const String appVersion = '3.4.5';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -187,7 +187,13 @@ class EspConfig {
   final String name;
   final String url;
   final String password;
-  const EspConfig({required this.name, required this.url, required this.password});
+  final List<int> enabledNumActions; // vide = tout afficher
+  const EspConfig({
+    required this.name,
+    required this.url,
+    required this.password,
+    this.enabledNumActions = const [],
+  });
 }
 
 class EspState {
@@ -275,7 +281,9 @@ class _HomeScreenState extends State<HomeScreen> {
   List<EspConfig> _espConfigs = [];
   List<EspState>  _espStates  = [];
   String _orientationMode = 'auto';
+  String _displayMode     = 'multi'; // 'multi' | 'single'
   int _currentPage = 0;
+  int? _singleSelectedId;  // encodé : espIdx * 1000 + numAction
   late PageController _pageController;
   Timer? _timer;
 
@@ -312,12 +320,15 @@ class _HomeScreenState extends State<HomeScreen> {
         final content = await file.readAsString();
         final data    = jsonDecode(content) as Map<String, dynamic>;
         orientation   = (data['orientation'] as String?) ?? 'auto';
+        final dm      = (data['display_mode'] as String?) ?? 'multi';
+        _displayMode  = dm;
         final list    = (data['configs'] as List).cast<Map<String, dynamic>>();
         for (final c in list) {
           configs.add(EspConfig(
-            name:     (c['name'] as String?) ?? 'ESP',
-            url:      (c['url']  as String?) ?? '',
-            password: (c['pwd']  as String?) ?? '',
+            name:               (c['name'] as String?) ?? 'ESP',
+            url:                (c['url']  as String?) ?? '',
+            password:           (c['pwd']  as String?) ?? '',
+            enabledNumActions:  (c['enabled'] as List?)?.cast<int>() ?? const [],
           ));
         }
       }
@@ -333,9 +344,10 @@ class _HomeScreenState extends State<HomeScreen> {
           final list = (jsonDecode(json) as List).cast<Map<String, dynamic>>();
           for (final c in list) {
             configs.add(EspConfig(
-              name:     (c['name'] as String?) ?? 'ESP',
-              url:      (c['url']  as String?) ?? '',
-              password: (c['pwd']  as String?) ?? '',
+              name:              (c['name'] as String?) ?? 'ESP',
+              url:               (c['url']  as String?) ?? '',
+              password:          (c['pwd']  as String?) ?? '',
+              enabledNumActions: (c['enabled'] as List?)?.cast<int>() ?? const [],
             ));
           }
         }
@@ -394,16 +406,19 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _saveConfig(List<EspConfig> configs, String orientation) async {
+  Future<void> _saveConfig(List<EspConfig> configs, String orientation, String displayMode) async {
+    _displayMode = displayMode;
     // ── Sauvegarde dans un fichier JSON (synchrone = garanti sur disque) ───
     try {
       final file    = await _configFile;
       final content = jsonEncode({
-        'orientation': orientation,
+        'orientation':  orientation,
+        'display_mode': _displayMode,
         'configs': configs.map((c) => {
-          'name': c.name,
-          'url':  c.url,
-          'pwd':  c.password,
+          'name':    c.name,
+          'url':     c.url,
+          'pwd':     c.password,
+          'enabled': c.enabledNumActions,
         }).toList(),
       });
       await file.writeAsString(content, flush: true); // flush=true force l'écriture disque
@@ -450,9 +465,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startPolling() {
     _timer?.cancel();
-    _fetchCapteursInfo(_currentPage);
-    _refreshEsp(_currentPage);
-    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshEsp(_currentPage));
+    if (_displayMode == 'single') {
+      // Mode page unique : poll tous les ESPs
+      for (var i = 0; i < _espConfigs.length; i++) _fetchCapteursInfo(i);
+      _refreshAll();
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshAll());
+    } else {
+      // Mode multi-pages : poll seulement la page visible
+      _fetchCapteursInfo(_currentPage);
+      _refreshEsp(_currentPage);
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshEsp(_currentPage));
+    }
+  }
+
+  Future<void> _refreshAll() async {
+    await Future.wait([
+      for (var i = 0; i < _espConfigs.length; i++) _refreshEsp(i),
+    ]);
   }
 
   Future<void> _fetchCapteursInfo(int idx) async {
@@ -565,6 +594,53 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  // ── Helpers mode page unique ────────────────────────────────────────────────
+
+  // Construit la liste combinée de tous les modules visibles de tous les ESPs
+  List<ModuleData> _buildCombinedModules() {
+    final result = <ModuleData>[];
+    for (var i = 0; i < _espConfigs.length; i++) {
+      if (i >= _espStates.length) continue;
+      final cfg   = _espConfigs[i];
+      final state = _espStates[i];
+      final visible = cfg.enabledNumActions.isEmpty
+          ? state.modules
+          : state.modules.where((m) => cfg.enabledNumActions.contains(m.numAction)).toList();
+      for (final m in visible) {
+        result.add(ModuleData(
+          numAction:  i * 1000 + m.numAction, // ID encodé unique
+          nom:        '${cfg.name} - ${m.nom}',
+          ouverture:  m.ouverture,
+          forcage:    m.forcage,
+          heureEquiv: m.heureEquiv,
+        ));
+      }
+    }
+    return result;
+  }
+
+  // Module sélectionné en mode single
+  ({int espIdx, ModuleData module})? _getSingleSelected() {
+    if (_singleSelectedId == null) return null;
+    final espIdx   = _singleSelectedId! ~/ 1000;
+    final numAction = _singleSelectedId! % 1000;
+    if (espIdx >= _espStates.length) return null;
+    for (final m in _espStates[espIdx].modules) {
+      if (m.numAction == numAction) return (espIdx: espIdx, module: m);
+    }
+    return null;
+  }
+
+  Future<void> _sendForceSingle(int encodedId, int force) async {
+    final espIdx   = encodedId ~/ 1000;
+    final numAction = encodedId % 1000;
+    if (espIdx >= _espStates.length) return;
+    setState(() {
+      _espStates[espIdx] = _espStates[espIdx].copyWith(selectedNumAction: numAction);
+    });
+    await _sendForce(espIdx, force);
+  }
+
   void _showConfig() {
     _timer?.cancel();
     showModalBottomSheet(
@@ -578,9 +654,10 @@ class _HomeScreenState extends State<HomeScreen> {
             ? _espConfigs
             : [const EspConfig(name: 'F1ATB Monitor', url: '', password: '')],
         currentOrientation: _orientationMode,
-        onSave: (configs, orientation) async {
-          await _saveConfig(configs, orientation); // sauvegarde d'abord
-          if (mounted) Navigator.pop(context);     // puis ferme
+        currentDisplayMode: _displayMode,
+        onSave: (configs, orientation, displayMode) async {
+          await _saveConfig(configs, orientation, displayMode);
+          if (mounted) Navigator.pop(context);
         },
       ),
     );
@@ -621,28 +698,28 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildGauges(EspState state, int espIdx,
-      {required bool multiModules}) {
-    if (!multiModules) {
+      {required List<ModuleData> modules}) {
+    if (modules.length <= 1) {
       return GaugeWidget(
-        value: state.modules.isNotEmpty ? (state.modules.first.ouverture ?? 0) : 0,
-        hasValue: state.modules.isNotEmpty && state.modules.first.ouverture != null,
+        value: modules.isNotEmpty ? (modules.first.ouverture ?? 0) : 0,
+        hasValue: modules.isNotEmpty && modules.first.ouverture != null,
       );
     }
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: ModulesGrid(
-        modules: state.modules,
+        modules: modules,
         selectedNumAction: state.selectedNumAction,
         onSelect: (n) => _selectModule(espIdx, n),
       ),
     );
   }
 
-  Widget _buildEquiv(EspState state, {required bool multiModules}) {
-    if (!multiModules && state.modules.isNotEmpty &&
-        state.modules.first.heureEquiv != null) {
+  Widget _buildEquiv(EspState state, {required List<ModuleData> modules}) {
+    if (modules.length <= 1 && modules.isNotEmpty &&
+        modules.first.heureEquiv != null) {
       return Text(
-        'équivalent à ${state.modules.first.heureEquiv} à 100%',
+        'équivalent à ${modules.first.heureEquiv} à 100%',
         style: const TextStyle(
             fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
       );
@@ -744,9 +821,15 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     if (_espConfigs.isEmpty) {
-      return const Scaffold(
-          body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+
+    // Mode page unique
+    if (_displayMode == 'single') {
+      return Scaffold(body: _buildSinglePageView());
+    }
+
+    // Mode multi-pages
     final multiEsp = _espConfigs.length > 1;
     return Scaffold(
       body: Stack(children: [
@@ -774,13 +857,244 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // ── Vue page unique (tous les ESP combinés) ─────────────────────────────────
+  // Tableau Soutiré/Injecté pour tous les ESPs en mode page unique
+  Widget _buildCombinedPowerCards() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // En-tête
+        Row(children: [
+          Expanded(child: Row(children: [
+            Container(width: 6, height: 6,
+                decoration: const BoxDecoration(shape: BoxShape.circle,
+                    color: Color(0xFFF43F5E))),
+            const SizedBox(width: 5),
+            const Text('SOUTIRÉ', style: TextStyle(fontSize: 10,
+                fontWeight: FontWeight.w600, letterSpacing: 1.4,
+                color: Color(0xFF5A6278))),
+          ])),
+          Expanded(child: Row(children: [
+            Container(width: 6, height: 6,
+                decoration: const BoxDecoration(shape: BoxShape.circle,
+                    color: Color(0xFF22D3A8))),
+            const SizedBox(width: 5),
+            const Text('INJECTÉ', style: TextStyle(fontSize: 10,
+                fontWeight: FontWeight.w600, letterSpacing: 1.4,
+                color: Color(0xFF5A6278))),
+          ])),
+        ]),
+        const SizedBox(height: 8),
+        // Une ligne par ESP
+        for (var i = 0; i < _espConfigs.length; i++)
+          if (i < _espStates.length) ...[
+            if (i > 0) const SizedBox(height: 6),
+            Row(children: [
+              Expanded(child: _espPowerCell(
+                  _espConfigs[i].name, _espStates[i].pws, const Color(0xFFF43F5E))),
+              Expanded(child: _espPowerCell(
+                  _espConfigs[i].name, _espStates[i].pwi, const Color(0xFF22D3A8))),
+            ]),
+          ],
+      ]),
+    );
+  }
+
+  Widget _espPowerCell(String espName, double value, Color color) {
+    return Row(children: [
+      Flexible(child: Text(espName,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 10, color: Color(0xFF5A6278)))),
+      const SizedBox(width: 4),
+      Text('${value.round()} W',
+          style: TextStyle(fontFamily: 'monospace', fontSize: 15,
+              fontWeight: FontWeight.w500, color: color)),
+    ]);
+  }
+
+  Widget _buildSinglePageView() {
+    final combined = _buildCombinedModules();
+    final sel      = _getSingleSelected();
+    final multiMod = combined.length > 1;
+    final forcage  = sel?.module.forcage ?? 0;
+    final statusOk = _espStates.any((s) => s.ok);
+    final statusTxt = statusOk
+        ? 'màj ${TimeOfDay.now().format(context)}'
+        : 'connexion…';
+
+    final fakeCfg = EspConfig(name: 'F1ATB Monitor', url: '', password: '');
+
+    // Blocs partagés
+    Widget gauges = !multiMod
+        ? GaugeWidget(
+      value: combined.isNotEmpty ? (combined.first.ouverture ?? 0) : 0,
+      hasValue: combined.isNotEmpty && combined.first.ouverture != null,
+    )
+        : Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: ModulesGrid(
+        modules: combined,
+        selectedNumAction: _singleSelectedId,
+        onSelect: (id) => setState(() => _singleSelectedId = id),
+      ),
+    );
+
+    Widget equiv = (!multiMod && combined.isNotEmpty && combined.first.heureEquiv != null)
+        ? Text('équivalent à ${combined.first.heureEquiv} à 100%',
+        style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'))
+        : const SizedBox.shrink();
+
+    Widget forceW = IgnorePointer(
+      ignoring: multiMod && sel == null,
+      child: Opacity(
+        opacity: (multiMod && sel == null) ? 0.4 : 1.0,
+        child: ForceWidget(
+          forcage: forcage,
+          onForce: (f) async {
+            if (sel != null) {
+              await _sendForceSingle(_singleSelectedId!, f);
+            } else if (!multiMod && combined.isNotEmpty) {
+              await _sendForceSingle(combined.first.numAction, f);
+            }
+          },
+        ),
+      ),
+    );
+
+    Widget status = Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        width: 6, height: 6,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: statusOk ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E),
+          boxShadow: statusOk ? [BoxShadow(
+              color: const Color(0xFF22D3A8).withOpacity(0.6), blurRadius: 6)] : null,
+        ),
+      ),
+      const SizedBox(width: 7),
+      Flexible(child: Text(statusTxt,
+          style: const TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace'))),
+      const SizedBox(width: 12),
+      const Text('v$appVersion',
+          style: TextStyle(fontSize: 11, color: Color(0xFF3A4258), fontFamily: 'monospace')),
+    ]);
+
+    Widget buildPortraitSingle() => Stack(children: [
+      Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+            child: _buildHeader(fakeCfg, compact: true, imageHeight: 80),
+          ),
+        ),
+        Expanded(
+          child: SafeArea(
+            top: false,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const SizedBox(height: 8),
+                gauges,
+                const SizedBox(height: 4),
+                equiv,
+                const SizedBox(height: 12),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: _buildCombinedPowerCards()),
+                const SizedBox(height: 12),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: forceW),
+                const SizedBox(height: 12),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: status),
+                const SizedBox(height: 16),
+              ]),
+            ),
+          ),
+        ),
+      ]),
+      SafeArea(
+        bottom: false,
+        child: Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
+            child: _configButton(),
+          ),
+        ),
+      ),
+    ]);
+
+    Widget buildLandscapeSingle() => SafeArea(
+      child: Stack(children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          // ── Gauche : header + jauges + équivalence ──────────────────────
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const SizedBox(height: 8),
+                _buildHeader(fakeCfg, compact: true, imageHeight: 60),
+                const SizedBox(height: 8),
+                gauges,
+                const SizedBox(height: 4),
+                equiv,
+                const SizedBox(height: 8),
+              ]),
+            ),
+          ),
+          Container(width: 0.5, color: Colors.white.withOpacity(0.07)),
+          // ── Droite : forçage + statut ────────────────────────────────────
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildCombinedPowerCards(),
+                  const SizedBox(height: 12),
+                  forceW,
+                  const SizedBox(height: 12),
+                  status,
+                ],
+              ),
+            ),
+          ),
+        ]),
+        Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
+            child: _configButton(),
+          ),
+        ),
+      ]),
+    );
+
+    // Sélection du layout selon l'orientation
+    if (_orientationMode == 'portrait')  return buildPortraitSingle();
+    if (_orientationMode == 'landscape') return buildLandscapeSingle();
+    return OrientationBuilder(builder: (ctx, orientation) =>
+    orientation == Orientation.landscape
+        ? buildLandscapeSingle()
+        : buildPortraitSingle());
+  }
+
   Widget _buildEspPage(BuildContext context, int idx) {
     if (idx >= _espStates.length) return const SizedBox();
     final cfg   = _espConfigs[idx];
     final state = _espStates[idx];
 
+    // Filtrer les modules selon les préférences d'affichage
+    final visibleModules = cfg.enabledNumActions.isEmpty
+        ? state.modules
+        : state.modules.where((m) => cfg.enabledNumActions.contains(m.numAction)).toList();
+
     // Portrait → toujours compact (image à gauche, titre à droite)
-    final multiModules  = state.modules.length > 1;
+    final multiModules  = visibleModules.length > 1;
     final capteursActifs = <int>[];
     for (var i = 0; i < 4; i++) {
       if (state.capteursInfo.length > i && state.capteursInfo[i].actif &&
@@ -803,25 +1117,25 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_orientationMode == 'portrait') {
       return _buildPortrait(cfg: cfg, state: state, espIdx: idx,
           capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules,
+          multiModules: multiModules, visibleModules: visibleModules,
           selected: selected, bottomPad: bottomPad);
     }
     if (_orientationMode == 'landscape') {
       return _buildLandscape(cfg: cfg, state: state, espIdx: idx,
           capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules, selected: selected,
-          bottomPad: bottomPad);
+          multiModules: multiModules, visibleModules: visibleModules,
+          selected: selected, bottomPad: bottomPad);
     }
     return OrientationBuilder(builder: (ctx, orientation) {
       if (orientation == Orientation.landscape) {
         return _buildLandscape(cfg: cfg, state: state, espIdx: idx,
             capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-            multiModules: multiModules, selected: selected,
-            bottomPad: bottomPad);
+            multiModules: multiModules, visibleModules: visibleModules,
+            selected: selected, bottomPad: bottomPad);
       }
       return _buildPortrait(cfg: cfg, state: state, espIdx: idx,
           capteursActifs: capteursActifs, hasCapteurs: hasCapteurs,
-          multiModules: multiModules,
+          multiModules: multiModules, visibleModules: visibleModules,
           selected: selected, bottomPad: bottomPad);
     });
   }
@@ -861,6 +1175,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required List<int> capteursActifs,
     required bool hasCapteurs,
     required bool multiModules,
+    required List<ModuleData> visibleModules,
     required ModuleData? selected,
     required double bottomPad,
   }) {
@@ -880,9 +1195,9 @@ class _HomeScreenState extends State<HomeScreen> {
             child: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 const SizedBox(height: 8),
-                _buildGauges(state, espIdx, multiModules: multiModules),
+                _buildGauges(state, espIdx, modules: visibleModules),
                 const SizedBox(height: 4),
-                _buildEquiv(state, multiModules: multiModules),
+                _buildEquiv(state, modules: visibleModules),
                 const SizedBox(height: 10),
                 if (hasCapteurs) ...[
                   Padding(
@@ -942,6 +1257,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required List<int> capteursActifs,
     required bool hasCapteurs,
     required bool multiModules,
+    required List<ModuleData> visibleModules,
     required ModuleData? selected,
     required double bottomPad,
   }) {
@@ -954,9 +1270,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 8),
                 _buildHeader(cfg, compact: true, imageHeight: 60),
                 const SizedBox(height: 8),
-                _buildGauges(state, espIdx, multiModules: multiModules),
+                _buildGauges(state, espIdx, modules: visibleModules),
                 const SizedBox(height: 4),
-                _buildEquiv(state, multiModules: multiModules),
+                _buildEquiv(state, modules: visibleModules),
                 SizedBox(height: 8 + bottomPad),
               ]),
             ),
@@ -1530,15 +1846,26 @@ class _ForceBtn extends StatelessWidget {
 
 // ── Feuille de config ──────────────────────────────────────────────────────────
 
+
+// ── Choix d'un module (pour les checkboxes dans config) ───────────────────────
+class _ModuleChoice {
+  final int numAction;
+  final String nom;
+  bool enabled;
+  _ModuleChoice({required this.numAction, required this.nom, required this.enabled});
+}
+
 // ── Feuille de config multi-ESP ────────────────────────────────────────────────
 class ConfigSheet extends StatefulWidget {
   final List<EspConfig> currentConfigs;
   final String currentOrientation;
-  final Future<void> Function(List<EspConfig>, String) onSave;
+  final String currentDisplayMode;
+  final Future<void> Function(List<EspConfig>, String, String) onSave;
   const ConfigSheet({
     super.key,
     required this.currentConfigs,
     required this.currentOrientation,
+    required this.currentDisplayMode,
     required this.onSave,
   });
 
@@ -1549,18 +1876,35 @@ class ConfigSheet extends StatefulWidget {
 class _ConfigSheetState extends State<ConfigSheet> {
   late List<Map<String, TextEditingController>> _ctrls;
   late String _orientation;
+  late String _displayMode;
   late int _count;
+
+  // État du test de connexion par ESP
+  late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
+  late List<bool> _testing;
 
   @override
   void initState() {
     super.initState();
     _orientation = widget.currentOrientation;
+    _displayMode = widget.currentDisplayMode;
     _count = widget.currentConfigs.length;
     _ctrls = widget.currentConfigs.map((c) => {
       'name': TextEditingController(text: c.name),
       'url':  TextEditingController(text: c.url),
       'pwd':  TextEditingController(text: c.password),
     }).toList();
+    _testedModules = List.generate(_count, (_) => null);
+    _testing       = List.generate(_count, (_) => false);
+
+    // Auto-test au chargement pour les ESPs déjà configurés (URL présente)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      for (var i = 0; i < _ctrls.length; i++) {
+        if (_ctrls[i]['url']!.text.isNotEmpty) {
+          _testConnection(i);
+        }
+      }
+    });
   }
 
   @override
@@ -1582,6 +1926,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
         'url':  TextEditingController(),
         'pwd':  TextEditingController(),
       });
+      _testedModules.add(null);
+      _testing.add(false);
     });
   }
 
@@ -1590,8 +1936,46 @@ class _ConfigSheetState extends State<ConfigSheet> {
     setState(() {
       final last = _ctrls.removeLast();
       last.values.forEach((c) => c.dispose());
+      _testedModules.removeLast();
+      _testing.removeLast();
       _count--;
     });
+  }
+
+  Future<void> _testConnection(int idx) async {
+    var url = _ctrls[idx]['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
+    if (url.isEmpty) return;
+    if (!url.startsWith('http')) url = 'http://$url';
+    final pwd    = _ctrls[idx]['pwd']!.text.trim();
+    final cookie = pwd.isNotEmpty ? 'CleAcces=$pwd' : null;
+
+    setState(() => _testing[idx] = true);
+    try {
+      final response = await simpleGet(
+        '$url/ajax_etatActions?Force=0&NumAction=0',
+        cookie: cookie,
+      ).timeout(const Duration(seconds: 8));
+
+      final modules = parseActionneurs(response);
+      // Récupère les modules déjà configurés pour cet ESP
+      final existingEnabled = idx < widget.currentConfigs.length
+          ? widget.currentConfigs[idx].enabledNumActions
+          : <int>[];
+
+      setState(() {
+        _testedModules[idx] = modules.map((m) => _ModuleChoice(
+          numAction: m.numAction,
+          nom:       m.nom,
+          enabled:   existingEnabled.isEmpty || existingEnabled.contains(m.numAction),
+        )).toList();
+        _testing[idx] = false;
+      });
+    } catch (_) {
+      setState(() {
+        _testedModules[idx] = []; // liste vide = échec
+        _testing[idx] = false;
+      });
+    }
   }
 
   InputDecoration _inputDeco(String hint) => InputDecoration(
@@ -1626,14 +2010,13 @@ class _ConfigSheetState extends State<ConfigSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Titre + compteur ESP ──────────────────────────────────────────
+            // ── Titre + compteur ESP ─────────────────────────────────────────
             Row(children: [
               const Expanded(
                 child: Text('Configuration',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
                         letterSpacing: 2.5, color: Color(0xFF5A6278))),
               ),
-              // Stepper nombre d'ESP
               Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFF0A0F1A),
@@ -1654,7 +2037,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
             ]),
             const SizedBox(height: 16),
 
-            // ── Groupes par ESP ───────────────────────────────────────────────
+            // ── Groupes par ESP ──────────────────────────────────────────────
             for (var i = 0; i < _ctrls.length; i++) ...[
               if (_ctrls.length > 1)
                 Container(
@@ -1701,13 +2084,99 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 autocorrect: false,
                 decoration: _inputDeco('Laisser vide si aucun'),
               ),
+              const SizedBox(height: 10),
+
+              // ── Bouton Test ────────────────────────────────────────────────
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _testing[i] ? null : () => _testConnection(i),
+                  icon: _testing[i]
+                      ? const SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Color(0xFFF97316)))
+                      : const Icon(Icons.wifi_find_outlined,
+                      size: 16, color: Color(0xFFF97316)),
+                  label: Text(
+                    _testing[i] ? 'Test en cours…' : 'Tester la connexion',
+                    style: const TextStyle(fontSize: 13, color: Color(0xFFF97316)),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Color(0xFFF97316), width: 0.5),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
+
+              // ── Résultat du test ───────────────────────────────────────────
+              if (_testedModules[i] != null) ...[
+                const SizedBox(height: 8),
+                if (_testedModules[i]!.isEmpty)
+                // Échec
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFF43F5E).withOpacity(0.4)),
+                    ),
+                    child: const Row(children: [
+                      Icon(Icons.error_outline, size: 14, color: Color(0xFFF43F5E)),
+                      SizedBox(width: 6),
+                      Text('Connexion échouée',
+                          style: TextStyle(fontSize: 12, color: Color(0xFFF43F5E))),
+                    ]),
+                  )
+                else ...[
+                  // Succès + checkboxes
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF14532D),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF22C55E).withOpacity(0.4)),
+                    ),
+                    child: const Row(children: [
+                      Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF22C55E)),
+                      SizedBox(width: 6),
+                      Text('Connexion OK — choisir les jauges à afficher :',
+                          style: TextStyle(fontSize: 12, color: Color(0xFF22C55E))),
+                    ]),
+                  ),
+                  const SizedBox(height: 4),
+                  for (final m in _testedModules[i]!)
+                    CheckboxListTile(
+                      value: m.enabled,
+                      onChanged: (v) => setState(() => m.enabled = v!),
+                      title: Text(m.nom,
+                          style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      activeColor: const Color(0xFFF97316),
+                      side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                ],
+              ],
               const SizedBox(height: 16),
               if (i < _ctrls.length - 1)
                 Divider(color: Colors.white.withOpacity(0.07), height: 1),
               const SizedBox(height: 16),
             ],
 
-            // ── Orientation ───────────────────────────────────────────────────
+            // ── Affichage ────────────────────────────────────────────────────
+            const Text('Affichage',
+                style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+            const SizedBox(height: 8),
+            _DisplayModeToggle(
+              value: _displayMode,
+              onChanged: (v) => setState(() => _displayMode = v),
+            ),
+            const SizedBox(height: 16),
+
+            // ── Orientation ──────────────────────────────────────────────────
             const Text('Orientation',
                 style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
             const SizedBox(height: 8),
@@ -1717,23 +2186,38 @@ class _ConfigSheetState extends State<ConfigSheet> {
             ),
             const SizedBox(height: 20),
 
-            // ── Bouton Connecter ──────────────────────────────────────────────
+            // ── Bouton Valider ───────────────────────────────────────────────
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () async {
-                  final configs = _ctrls.map((m) {
-                    var url = m['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
+                  final configs = _ctrls.asMap().entries.map((entry) {
+                    final i   = entry.key;
+                    final m   = entry.value;
+                    var url   = m['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
                     if (url.isNotEmpty && !url.startsWith('http')) url = 'http://$url';
+                    // Détermine les modules activés
+                    List<int> enabled;
+                    final tested = _testedModules[i];
+                    if (tested != null && tested.isNotEmpty) {
+                      // Test réussi → utilise les checkboxes
+                      enabled = tested.where((m) => m.enabled)
+                          .map((m) => m.numAction).toList();
+                    } else {
+                      // Non testé ou échec → conserve l'existant
+                      enabled = i < widget.currentConfigs.length
+                          ? widget.currentConfigs[i].enabledNumActions
+                          : const [];
+                    }
                     return EspConfig(
                       name: m['name']!.text.trim().isEmpty
-                          ? 'ESP ${_ctrls.indexOf(m) + 1}'
-                          : m['name']!.text.trim(),
+                          ? 'ESP ${i + 1}' : m['name']!.text.trim(),
                       url: url,
                       password: m['pwd']!.text.trim(),
+                      enabledNumActions: enabled,
                     );
                   }).toList();
-                  await widget.onSave(configs, _orientation);
+                  await widget.onSave(configs, _orientation, _displayMode);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
@@ -1742,7 +2226,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12)),
                 ),
-                child: const Text('Connecter',
+                child: const Text('Valider',
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
               ),
             ),
@@ -1762,6 +2246,59 @@ class _ConfigSheetState extends State<ConfigSheet> {
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600,
                 color: enabled ? const Color(0xFFE8EAF0) : const Color(0xFF3A4258))),
       ),
+    );
+  }
+}
+
+// ── Toggle 2 positions pour le mode d'affichage ───────────────────────────────
+class _DisplayModeToggle extends StatelessWidget {
+  final String value; // 'multi' | 'single'
+  final void Function(String) onChanged;
+  const _DisplayModeToggle({required this.value, required this.onChanged});
+
+  static const _options = [
+    ('multi',  '⧉ Multipages'),
+    ('single', '▣ Page unique'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0A0F1A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+      ),
+      child: Row(children: [
+        for (var i = 0; i < _options.length; i++) ...[
+          Expanded(
+            child: GestureDetector(
+              onTap: () => onChanged(_options[i].$1),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                decoration: BoxDecoration(
+                  color: value == _options[i].$1
+                      ? const Color(0xFFF97316) : Colors.transparent,
+                  borderRadius: BorderRadius.horizontal(
+                    left:  i == 0 ? const Radius.circular(11) : Radius.zero,
+                    right: i == _options.length - 1
+                        ? const Radius.circular(11) : Radius.zero,
+                  ),
+                ),
+                child: Text(_options[i].$2,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                      color: value == _options[i].$1
+                          ? Colors.white : const Color(0xFF5A6278)),
+                ),
+              ),
+            ),
+          ),
+          if (i < _options.length - 1)
+            Container(width: 0.5, height: 36, color: Colors.white.withOpacity(0.08)),
+        ],
+      ]),
     );
   }
 }
