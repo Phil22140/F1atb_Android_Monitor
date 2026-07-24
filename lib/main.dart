@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -34,7 +35,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.5.5';
+const String appVersion = '4.0.20';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -205,8 +206,8 @@ class EspState {
   final List<double?> temperatures;
   final double pws;
   final double pwi;
-  final double pwsT;   // puissance soutirée sonde fixe (Triac)
-  final double pwiT;   // puissance injectée sonde fixe (Triac)
+  final double pwsT;   // puissance soutiree sonde fixe (Triac)
+  final double pwiT;   // puissance injectee sonde fixe (Triac)
   final String nomSonde1; // nom sonde mobile (G1)
   final String nomSonde2; // nom sonde fixe (G2) — vide = pas de seconde sonde
   final String nomPpos;   // label puissance positive sonde fixe (ex: "Soutiré")
@@ -837,6 +838,80 @@ class _HomeScreenState extends State<HomeScreen> {
     ]);
   }
 
+  Widget _chartButton(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.3), shape: BoxShape.circle),
+      child: IconButton(
+        onPressed: () {
+          if (_displayMode == 'single' && _espConfigs.length > 1) {
+            _openChartsWithPicker(context);
+          } else {
+            _openCharts(context, _currentPage);
+          }
+        },
+        icon: const _ChartIcon(),
+        tooltip: 'Graphiques',
+      ),
+    );
+  }
+
+  // Colonne boutons droite : ⚙ au-dessus, icône chart en-dessous
+  Widget _actionButtons(BuildContext context,
+      {double top = 18, double right = 36}) {
+    return Align(
+      alignment: Alignment.topRight,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(0, top, right, 0),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          _configButton(),
+          const SizedBox(height: 6),
+          _chartButton(context),
+        ]),
+      ),
+    );
+  }
+
+  void _openCharts(BuildContext context, int espIdx) {
+    if (espIdx >= _espConfigs.length) return;
+    Navigator.push(context, MaterialPageRoute(
+      builder: (_) => ChartsPage(
+        config:       _espConfigs[espIdx],
+        title:        _espConfigs[espIdx].name,
+        initialState: espIdx < _espStates.length ? _espStates[espIdx] : null,
+      ),
+    ));
+  }
+
+  void _openChartsWithPicker(BuildContext context) {
+    if (_espConfigs.length == 1) { _openCharts(context, 0); return; }
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF111827),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
+            child: Text('Graphiques de quel ESP ?',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                    letterSpacing: 2, color: Color(0xFF5A6278))),
+          ),
+          for (var i = 0; i < _espConfigs.length; i++)
+            ListTile(
+              title: Text(_espConfigs[i].name,
+                  style: const TextStyle(color: Color(0xFFE8EAF0))),
+              leading: const Icon(Icons.show_chart, color: Color(0xFFF97316)),
+              onTap: () { Navigator.pop(context); _openCharts(context, i); },
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
   Widget _configButton() {
     return Container(
       decoration: BoxDecoration(
@@ -1106,13 +1181,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ]),
       SafeArea(
         bottom: false,
-        child: Align(
-          alignment: Alignment.topRight,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
-            child: _configButton(),
-          ),
-        ),
+        child: _actionButtons(context, top: 18, right: 36),
       ),
     ]);
 
@@ -1156,13 +1225,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ]),
-        Align(
-          alignment: Alignment.topRight,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
-            child: _configButton(),
-          ),
-        ),
+        _actionButtons(context, top: 4, right: 8),
       ]),
     );
 
@@ -1332,13 +1395,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ]),
       SafeArea(
         bottom: false,
-        child: Align(
-          alignment: Alignment.topRight,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, 18, 36, 0),
-            child: _configButton(),
-          ),
-        ),
+        child: _actionButtons(context, top: 18, right: 36),
       ),
     ]);
   }
@@ -1400,16 +1457,73 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ]),
-        Align(
-          alignment: Alignment.topRight,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
-            child: _configButton(),
-          ),
-        ),
+        _actionButtons(context, top: 4, right: 8),
       ]),
     );
   }
+}
+
+// ── Icône graphique custom ─────────────────────────────────────────────────────
+class _ChartIcon extends StatelessWidget {
+  const _ChartIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: const Size(22, 22),
+      painter: _ChartIconPainter(),
+    );
+  }
+}
+
+class _ChartIconPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8;
+
+    final w = size.width, h = size.height;
+
+    // Axes
+    final axesPaint = Paint()
+      ..color = Colors.white.withOpacity(0.5)
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(0, h), Offset(w, h), axesPaint); // X
+    canvas.drawLine(Offset(0, 0), Offset(0, h), axesPaint); // Y
+
+    // Courbe sinusoïdale stylisée
+    final path = Path();
+    final pts = [
+      Offset(0,        h * 0.75),
+      Offset(w * 0.15, h * 0.70),
+      Offset(w * 0.30, h * 0.55),
+      Offset(w * 0.45, h * 0.35),
+      Offset(w * 0.60, h * 0.20),
+      Offset(w * 0.75, h * 0.30),
+      Offset(w * 0.90, h * 0.18),
+      Offset(w,        h * 0.10),
+    ];
+    path.moveTo(pts[0].dx, pts[0].dy);
+    for (var i = 0; i < pts.length - 1; i++) {
+      final cp = Offset((pts[i].dx + pts[i+1].dx) / 2,
+          (pts[i].dy + pts[i+1].dy) / 2);
+      path.quadraticBezierTo(pts[i].dx, pts[i].dy, cp.dx, cp.dy);
+    }
+    path.lineTo(pts.last.dx, pts.last.dy);
+    canvas.drawPath(path, paint);
+
+    // Point final (valeur actuelle)
+    canvas.drawCircle(pts.last, 2.2,
+        Paint()..color = const Color(0xFFF97316)..style = PaintingStyle.fill);
+  }
+
+  @override
+  bool shouldRepaint(_) => false;
 }
 
 // ── Jauge circulaire ───────────────────────────────────────────────────────────
@@ -2545,4 +2659,679 @@ class _OrientationToggle extends StatelessWidget {
       ]),
     );
   }
+}
+
+
+
+// ── Page des graphiques ────────────────────────────────────────────────────────
+class ChartsPage extends StatefulWidget {
+  final EspConfig config;
+  final String    title;
+  final EspState? initialState;
+  const ChartsPage({super.key, required this.config, required this.title,
+    this.initialState});
+
+  @override
+  State<ChartsPage> createState() => _ChartsPageState();
+}
+
+class _ChartsPageState extends State<ChartsPage>
+    with SingleTickerProviderStateMixin {
+
+  late TabController _tabCtrl;
+  Timer? _timer2s;
+  Timer? _timer5min;
+
+  String _nomSonde1 = '';
+  String _nomSonde2 = '';
+  List<CapteurInfo> _capteurInfos =
+  List.generate(4, (_) => const CapteurInfo(nom: '', actif: false));
+  bool _paraFixeFetched = false;
+
+  // 10mn
+  List<double> _pwM10 = [], _pvaM10 = [], _pwT10 = [], _pvaT10 = [];
+  final List<List<double>> _tempBufs10 = [[], [], [], []];
+  final Map<int, List<double>> _ouvBufs = {};   // 10mn (333 pts max)
+  final Map<int, List<double>> _ouvBufs48 = {}; // 48h  (576 pts max, 1 pt/5min)
+  List<ModuleData> _modules = [];
+  static const int kMax10 = 333;
+
+  // 48h
+  List<double> _pwM48 = [], _pvaM48 = [], _pwT48 = [], _pvaT48 = [];
+  List<List<double>> _temps48 = [];
+  List<List<double>> _ouvs48  = [];
+  List<String>       _ouvNoms48 = [];
+
+  // 1an
+  List<_Histo1anEntry> _entries1an = [];
+
+  bool   _loading10 = true,  _loading48 = true,  _loading1an = true;
+  String _status10  = '…',   _status48  = '…',   _status1an  = '…';
+
+  @override
+  void initState() {
+    super.initState();
+    _tabCtrl = TabController(length: 3, vsync: this);
+    if (widget.initialState != null) {
+      _nomSonde1    = widget.initialState!.nomSonde1;
+      _nomSonde2    = widget.initialState!.nomSonde2;
+      if (widget.initialState!.capteursInfo.isNotEmpty)
+        _capteurInfos = widget.initialState!.capteursInfo;
+      _modules = widget.initialState!.modules;
+    }
+    _refresh10(); _refresh48(); _refresh1an();
+    _timer2s   = Timer.periodic(const Duration(seconds: 2),  (_) => _refresh10());
+    _timer5min = Timer.periodic(const Duration(minutes: 5),  (_) { _refresh48(); _refresh1an(); _sampleOuv48(); });
+  }
+
+  @override
+  void dispose() {
+    _tabCtrl.dispose(); _timer2s?.cancel(); _timer5min?.cancel();
+    super.dispose();
+  }
+
+  String  get _base   => widget.config.url.trimRight().replaceAll(RegExp(r'/$'), '');
+  String? get _cookie => widget.config.password.isNotEmpty ? 'CleAcces=${widget.config.password}' : null;
+
+  Future<void> _ensureParaFixe() async {
+    if (_paraFixeFetched) return;
+    try {
+      final pf   = await simpleGet('$_base/ParaFixe', cookie: _cookie).timeout(const Duration(seconds: 5));
+      final data = jsonDecode(pf) as Map<String, dynamic>;
+      _nomSonde1 = (data['nomSondeMobile'] ?? '').toString();
+      _nomSonde2 = (data['nomSondeFixe']   ?? '').toString();
+      final src  = (data['Source'] ?? '').toString();
+      if (src == 'Ext' || src == 'ShellyPro') _nomSonde2 = '';
+      if ((data['nomSfixePpos'] ?? '').toString().isEmpty &&
+          (data['nomSfixePneg'] ?? '').toString().isEmpty) _nomSonde2 = '';
+      _capteurInfos    = parseCapteursInfo(pf);
+      _paraFixeFetched = true;
+    } catch (_) {}
+  }
+
+  // ── Parser ajax_data10mn (format simple : GS entre groupes) ─────────────────
+  List<List<double>> _parsePower(String body) {
+    List<List<double>> pg(String raw) {
+      final v  = raw.split(',').map((s) => double.tryParse(s.trim()) ?? 0.0).toList();
+      final w  = <double>[], va = <double>[];
+      for (var i = 0; i + 1 < v.length; i += 2) { w.add(v[i]); va.add(v[i+1]); }
+      return [w, va];
+    }
+    final g = body.split(GS);
+    if (g.length < 2) return [[], [], [], []];
+    final g1 = pg(g[1]);
+    final g2 = g.length >= 3 ? pg(g[2]) : [<double>[], <double>[]];
+    return [g1[0], g1[1], g2[0], g2[1]];
+  }
+
+  // ── Parser ajax_histo48h / ajax_histo1an ─────────────────────────────────
+  // GS peut être :
+  //   - fragmentation réseau (même type de données des deux côtés) → fusionner
+  //   - séparateur structurel (transition int→float ou float→int) → nouvelle série
+  // Le token '-' seul sépare les sous-séries à l'intérieur des blocs entiers
+  Map<String, List<double>> _parseHisto(String body) {
+    final chunks = body.split(GS);
+    if (chunks.length < 2) return {};
+
+    bool looksFloat(String s) {
+      final first = s.trim().split(',').first.trim();
+      return first.contains('.') && double.tryParse(first) != null;
+    }
+
+    // Traiter chunk par chunk en détectant les transitions de type
+    final allSeries = <List<double>>[];
+    List<double> current = [];
+    String? prevType; // 'int' | 'float'
+
+    void commitCurrent() {
+      if (current.isNotEmpty) { allSeries.add(List.of(current)); current.clear(); }
+    }
+
+    for (var i = 1; i < chunks.length; i++) { // chunks[0] = métadonnées
+      final s = chunks[i];
+      if (s.trim().isEmpty) continue;
+      final curType = looksFloat(s) ? 'float' : 'int';
+
+      // Changement de type → séparateur structurel → nouvelle série
+      if (prevType != null && curType != prevType) commitCurrent();
+
+      for (final t in s.split(',')) {
+        final v = t.trim();
+        if (v == '-') {
+          // Séparateur de sous-série dans les blocs entiers
+          commitCurrent();
+        } else {
+          final d = double.tryParse(v);
+          if (d != null) current.add(d);
+        }
+      }
+      prevType = curType;
+    }
+    commitCurrent();
+
+    // Classer les séries par leur position et type
+    // Floats → températures | Entiers avant floats → puissance | Après floats → ouvertures
+    final pwSeries   = <List<double>>[];
+    final tempSeries = <List<double>>[];
+    final ouvSeries  = <List<double>>[];
+    bool floatFound  = false;
+
+    for (final s in allSeries) {
+      if (s.length < 5) continue; // ignorer les fragments trop courts
+      final hasFloat = s.any((v) => v != v.truncate()); // valeur non entière
+      if (hasFloat) {
+        floatFound = true;
+        tempSeries.add(s);
+      } else if (floatFound) {
+        ouvSeries.add(s);
+      } else {
+        pwSeries.add(s);
+      }
+    }
+
+    final result = <String, List<double>>{};
+    for (var i = 0; i < pwSeries.length;   i++) result['pw_$i']   = pwSeries[i];
+    for (var i = 0; i < tempSeries.length; i++) result['temp_$i'] = tempSeries[i];
+    for (var i = 0; i < ouvSeries.length;  i++) result['ouv_$i']  = ouvSeries[i];
+    return result;
+  }
+
+  Future<void> _refresh10() async {
+    await _ensureParaFixe();
+    try {
+      final r = await Future.wait([
+        simpleGet('$_base/ajax_data10mn', cookie: _cookie),
+        simpleGet('$_base/ajax_data',     cookie: _cookie),
+        simpleGet('$_base/ajax_etatActions?Force=0&NumAction=0', cookie: _cookie),
+      ]).timeout(const Duration(seconds: 5));
+      final pw = _parsePower(r[0]);
+      final tp = parseTemperatures(r[1]);
+      final mo = parseActionneurs(r[2]);
+      if (!mounted) return;
+      setState(() {
+        _pwM10 = pw[0]; _pvaM10 = pw[1]; _pwT10 = pw[2]; _pvaT10 = pw[3];
+        for (var i = 0; i < 4; i++) {
+          if (tp[i] != null) { _tempBufs10[i].add(tp[i]!); if (_tempBufs10[i].length > kMax10) _tempBufs10[i].removeAt(0); }
+        }
+        _modules = mo;
+        for (final m in mo) {
+          _ouvBufs.putIfAbsent(m.numAction, () => []);
+          _ouvBufs[m.numAction]!.add(m.ouverture ?? 0);
+          if (_ouvBufs[m.numAction]!.length > kMax10) _ouvBufs[m.numAction]!.removeAt(0);
+        }
+        _loading10 = false; _status10 = TimeOfDay.now().format(context);
+      });
+    } catch (_) { if (mounted) setState(() => _status10 = 'erreur'); }
+  }
+
+  // ── Parser ouvertures 48h ─────────────────────────────────────────────────
+  // Structure : [power_data] | [capteurs]
+  // Capteurs : GS val1 RS val2 RS ... RS NomModule GS val1 RS ... RS NomModule2
+  List<({List<double> values, String nom})> _parseOuvertures48h(String body) {
+    // 1. Prendre tout ce qui est après le dernier '|'
+    final lastPipe = body.lastIndexOf('|');
+    if (lastPipe < 0) return [];
+    final section = body.substring(lastPipe + 1);
+
+    // 2. Chaque capteur commence par GS
+    final chunks = section.split(GS)
+        .where((s) => s.trim().isNotEmpty).toList();
+
+    final result = <({List<double> values, String nom})>[];
+
+    for (final chunk in chunks) {
+      // 3. Les champs sont séparés par RS
+      final fields = chunk.split(RS)
+          .map((f) => f.trim()).where((f) => f.isNotEmpty).toList();
+      if (fields.length < 2) continue;
+
+      // 4. Dernier champ = nom du module
+      final nom    = fields.last;
+      if (double.tryParse(nom) != null) continue; // sécurité : doit être du texte
+
+      // 5. Champs précédents = valeurs d'ouverture (entiers 0-100)
+      final values = fields.sublist(0, fields.length - 1)
+          .map((v) => double.tryParse(v))
+          .where((v) => v != null && v >= 0 && v <= 100)
+          .cast<double>().toList();
+
+      if (values.isNotEmpty) result.add((values: values, nom: nom));
+    }
+    return result;
+  }
+
+
+  Future<void> _refresh48() async {
+    await _ensureParaFixe();
+    try {
+      final body    = await simpleGet('$_base/ajax_histo48h', cookie: _cookie)
+          .timeout(const Duration(seconds: 10));
+      final pw      = _parsePower(body);
+      final parsed  = _parseHisto(body);
+      final ouvData = _parseOuvertures48h(body);
+      if (!mounted) return;
+      setState(() {
+        _pwM48     = pw[0]; _pvaM48 = pw[1];
+        _pwT48     = pw[2]; _pvaT48 = pw[3];
+        _temps48   = parsed.entries
+            .where((e) => e.key.startsWith('temp_'))
+            .map((e) => e.value).toList();
+        _ouvs48    = ouvData.map((o) => o.values).toList();
+        _ouvNoms48 = ouvData.map((o) => o.nom).toList();
+        _loading48 = false;
+        _status48  = TimeOfDay.now().format(context);
+      });
+    } catch (_) {
+      if (mounted) setState(() { _loading48 = false; _status48 = 'erreur'; });
+    }
+  }
+
+  Future<void> _refresh1an() async {
+    try {
+      final body    = await simpleGet('$_base/ajax_histo1an', cookie: _cookie)
+          .timeout(const Duration(seconds: 10));
+      final entries = _parse1an(body);
+      if (!mounted) return;
+      setState(() {
+        _entries1an = entries;
+        _loading1an = false;
+        _status1an  = TimeOfDay.now().format(context);
+      });
+    } catch (_) {
+      if (mounted) setState(() { _loading1an = false; _status1an = 'erreur'; });
+    }
+  }
+
+  List<_Histo1anEntry> _parse1an(String body) {
+    try {
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      final list = (data['EnergieJour'] as List).cast<String>();
+
+      // Grouper par date : garder la meilleure entrée (non-reset ou durée max)
+      final byDate = <String, _Histo1anEntry>{};
+
+      for (final r in list) {
+        final f = r.split(',');
+        if (f.length < 3) continue;
+        final date = f[0].trim();
+        if (!RegExp(r'^\d{8}$').hasMatch(date)) continue;
+
+        final sout  = double.tryParse(f[1].trim()) ?? 0.0;
+        final inj   = double.tryParse(f[2].trim()) ?? 0.0;
+        final sout2 = f.length > 3 && f[3].trim().isNotEmpty
+            ? (double.tryParse(f[3].trim()) ?? 0.0) : 0.0;
+        final inj2  = f.length > 4 && f[4].trim().isNotEmpty
+            ? (double.tryParse(f[4].trim()) ?? 0.0) : 0.0;
+        final duration = f.length > 5 ? (double.tryParse(f[5].trim()) ?? 0.0) : 0.0;
+        final endField = f.length > 6 ? f.sublist(6).join(',').trim() : '';
+        final isReset  = endField.toLowerCase().contains('reset') ||
+            endField.toLowerCase().contains('restart');
+
+        final entry = _Histo1anEntry(
+          date: date, soutire: sout, injecte: inj,
+          soutire2: sout2, injecte2: inj2,
+          duration: duration, isReset: isReset,
+        );
+
+        // Préférer : non-reset > reset, puis durée la plus longue
+        final existing = byDate[date];
+        if (existing == null ||
+            (!isReset && existing.isReset) ||
+            (isReset == existing.isReset && duration > existing.duration)) {
+          byDate[date] = entry;
+        }
+      }
+
+      // Trier par date chronologique
+      final sorted = byDate.entries.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      return sorted.map((e) => e.value).toList();
+
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Échantillonnage toutes les 5min des ouvertures pour le graphique 48h
+  void _sampleOuv48() {
+    for (final m in _modules) {
+      _ouvBufs48.putIfAbsent(m.numAction, () => []);
+      _ouvBufs48[m.numAction]!.add(m.ouverture ?? 0);
+      if (_ouvBufs48[m.numAction]!.length > 576) { // 48h × 12 pts/h
+        _ouvBufs48[m.numAction]!.removeAt(0);
+      }
+    }
+  }
+
+  Widget _buildChart({required String title, required List<List<double>> series,
+    required List<Color> colors, required List<String> labels, String unit = 'W',
+    double? forceMinY, double? forceMaxY}) {
+    if (series.every((s) => s.isEmpty)) return const SizedBox.shrink();
+    double maxY = 0, minY = 0;
+    for (final s in series) for (final v in s) { if (v > maxY) maxY = v; if (v < minY) minY = v; }
+    maxY = forceMaxY ?? (maxY < 10 ? 10 : maxY * 1.15);
+    minY = forceMinY ?? (minY > -10 ? (minY < 0 ? minY * 1.15 : 0) : minY * 1.15);
+    final bars = <LineChartBarData>[];
+    for (var i = 0; i < series.length; i++) {
+      if (series[i].isEmpty) continue;
+      bars.add(LineChartBarData(
+        spots: series[i].asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value)).toList(),
+        isCurved: true, curveSmoothness: 0.25, color: colors[i % colors.length],
+        barWidth: series[i].length > 100 ? 1.5 : 2, dotData: const FlDotData(show: false),
+        belowBarData: BarAreaData(show: true, color: colors[i % colors.length].withOpacity(0.08)),
+      ));
+    }
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
+      decoration: BoxDecoration(color: const Color(0xFF111827),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withOpacity(0.08))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(title, style: const TextStyle(fontSize: 10,
+              fontWeight: FontWeight.w600, letterSpacing: 1.5, color: Color(0xFF5A6278)))),
+          for (var i = 0; i < labels.length; i++) ...[
+            if (i > 0) const SizedBox(width: 10),
+            Container(width: 8, height: 8, decoration: BoxDecoration(
+                color: colors[i % colors.length], shape: BoxShape.circle)),
+            const SizedBox(width: 4),
+            Text(labels[i], style: const TextStyle(fontSize: 10, color: Color(0xFF5A6278))),
+          ],
+        ]),
+        const SizedBox(height: 10),
+        SizedBox(height: 130, child: LineChart(LineChartData(
+          clipData: const FlClipData.all(),
+          gridData: FlGridData(show: true, drawVerticalLine: false,
+              getDrawingHorizontalLine: (v) => FlLine(
+                  color: v == 0 && minY < 0 ? Colors.white.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+                  strokeWidth: v == 0 && minY < 0 ? 1.5 : 1)),
+          borderData: FlBorderData(show: false),
+          titlesData: FlTitlesData(
+            leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 38,
+                getTitlesWidget: (v, _) => Text('${v.toInt()}$unit',
+                    style: const TextStyle(fontSize: 9, color: Color(0xFF5A6278))))),
+            rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          ),
+          minY: minY, maxY: maxY, lineBarsData: bars,
+          lineTouchData: LineTouchData(touchTooltipData: LineTouchTooltipData(
+              getTooltipItems: (spots) => spots.map((s) => LineTooltipItem(
+                  '${s.y.toStringAsFixed(0)}$unit',
+                  TextStyle(color: colors[s.barIndex % colors.length],
+                      fontSize: 11, fontWeight: FontWeight.w600))).toList())),
+        ))),
+      ]),
+    );
+  }
+
+  // ── Histogramme annuel ────────────────────────────────────────────────────
+  Widget _buildHistoBar(List<_Histo1anEntry> entries) {
+    if (entries.isEmpty) {
+      return Center(child: Text('Aucune donnée ($_status1an)',
+          style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278))));
+    }
+
+    String labelDate(String d) =>
+        d.length == 8 ? '${d.substring(6)}/${d.substring(4, 6)}' : d;
+
+    double maxY = 0;
+    for (final e in entries) { if (e.soutire > maxY) maxY = e.soutire; }
+    maxY = maxY < 100 ? 100 : maxY * 1.15;
+
+    final barWidth = (entries.length > 60 ? 5.0 : entries.length > 30 ? 8.0 : 12.0);
+    final chartWidth = entries.length * (barWidth + 3) + 60;
+
+    Widget chart = BarChart(BarChartData(
+      maxY:  maxY,
+      minY: -maxY * 0.3,
+      gridData: FlGridData(
+        show: true, drawVerticalLine: false,
+        getDrawingHorizontalLine: (v) => FlLine(
+          color: v == 0 ? Colors.white.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+          strokeWidth: v == 0 ? 1.5 : 1,
+        ),
+      ),
+      borderData: FlBorderData(show: false),
+      titlesData: FlTitlesData(
+        leftTitles: AxisTitles(sideTitles: SideTitles(
+          showTitles: true, reservedSize: 44,
+          getTitlesWidget: (v, _) => Text('${(v/1000).toStringAsFixed(1)}k',
+              style: const TextStyle(fontSize: 9, color: Color(0xFF5A6278))),
+        )),
+        rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        bottomTitles: AxisTitles(sideTitles: SideTitles(
+          showTitles: true, reservedSize: 22,
+          getTitlesWidget: (v, _) {
+            final i = v.toInt();
+            if (i < 0 || i >= entries.length) return const SizedBox();
+            // Afficher le label tous les 7 jours environ
+            final step = entries.length > 60 ? (entries.length ~/ 12) : 7;
+            if (i % step != 0) return const SizedBox();
+            return Transform.rotate(
+              angle: -0.5,
+              child: Text(labelDate(entries[i].date),
+                  style: const TextStyle(fontSize: 8, color: Color(0xFF5A6278))),
+            );
+          },
+        )),
+      ),
+      barGroups: entries.asMap().entries.map((e) {
+        final alpha = e.value.isReset ? 0.45 : 1.0;
+        return BarChartGroupData(
+          x: e.key,
+          barRods: [
+            BarChartRodData(fromY: 0, toY: e.value.soutire,
+                color: const Color(0xFFF43F5E).withOpacity(alpha),
+                width: barWidth,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(2))),
+            if (e.value.injecte > 0)
+              BarChartRodData(fromY: -e.value.injecte, toY: 0,
+                  color: const Color(0xFF22D3A8).withOpacity(alpha),
+                  width: barWidth,
+                  borderRadius: const BorderRadius.vertical(bottom: Radius.circular(2))),
+          ],
+        );
+      }).toList(),
+      barTouchData: BarTouchData(
+        touchTooltipData: BarTouchTooltipData(
+          fitInsideVertically: true,
+          fitInsideHorizontally: true,
+          getTooltipItem: (group, _, rod, rodIndex) {
+            final e      = entries[group.x];
+            final label  = labelDate(e.date);
+            final reset  = e.isReset ? '\n⚠ ${e.duration.toStringAsFixed(1)}h' : '';
+            return BarTooltipItem(
+              '$label\n',
+              const TextStyle(color: Color(0xFFE8EAF0),
+                  fontSize: 11, fontWeight: FontWeight.w600),
+              children: [
+                TextSpan(
+                    text: '↑ ${(e.soutire / 1000).toStringAsFixed(2)} kWh',
+                    style: const TextStyle(color: Color(0xFFF43F5E),
+                        fontSize: 11, fontWeight: FontWeight.w600)),
+                TextSpan(
+                    text: '\n↓ ${(e.injecte / 1000).toStringAsFixed(2)} kWh$reset',
+                    style: const TextStyle(color: Color(0xFF22D3A8),
+                        fontSize: 11, fontWeight: FontWeight.w600)),
+              ],
+            );
+          },
+        ),
+      ),
+    ));
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Expanded(child: Text('ÉNERGIE JOUR · 1 AN',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                  letterSpacing: 1.5, color: Color(0xFF5A6278)))),
+          Container(width: 8, height: 8, decoration: const BoxDecoration(
+              color: Color(0xFFF43F5E), shape: BoxShape.circle)),
+          const SizedBox(width: 4),
+          const Text('Wh soutire', style: TextStyle(fontSize: 10, color: Color(0xFF5A6278))),
+          const SizedBox(width: 10),
+          Container(width: 8, height: 8, decoration: const BoxDecoration(
+              color: Color(0xFF22D3A8), shape: BoxShape.circle)),
+          const SizedBox(width: 4),
+          const Text('Wh injecte', style: TextStyle(fontSize: 10, color: Color(0xFF5A6278))),
+        ]),
+        const SizedBox(height: 10),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: max(chartWidth, 300),
+            height: 150,
+            child: chart,
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildTabContent({
+    required bool loading, required String status,
+    required List<double> pwM, required List<double> pvaM,
+    required List<double> pwT, required List<double> pvaT,
+    List<List<double>>? tempBufs,    // 10mn : buffer par index capteur
+    List<List<double>>? tempsList,   // 48h : liste de séries de températures
+    Map<int, List<double>>? ouvBufs, // 10mn : buffer par numAction
+    List<List<double>>? ouvsList,    // 48h : liste de séries d'ouvertures
+    List<String>?       ouvsNoms,    // 48h : noms des modules d'ouvertures
+    List<ModuleData>? modules, required String windowLabel,
+  }) {
+    if (loading) return const Center(child: CircularProgressIndicator(color: Color(0xFFF97316), strokeWidth: 2));
+    final nomS1 = _nomSonde1.isNotEmpty ? _nomSonde1.toUpperCase() : 'SONDE';
+    final nomS2 = _nomSonde2.isNotEmpty ? _nomSonde2.toUpperCase() : '';
+    final hasVAM = pvaM.any((v) => v > 0), hasVAT = pvaT.any((v) => v > 0);
+    final tc = [const Color(0xFFF97316), const Color(0xFF22D3A8), const Color(0xFF3B82F6), const Color(0xFFA855F7)];
+    final oc = [const Color(0xFFF97316), const Color(0xFF3B82F6), const Color(0xFF22D3A8), const Color(0xFFA855F7)];
+    final charts = <Widget>[];
+    if (pwM.isNotEmpty) charts.add(_buildChart(
+        title: 'PUISSANCE $nomS1 · $windowLabel',
+        series: [pwM, if (hasVAM) pvaM],
+        colors: [const Color(0xFFF43F5E), const Color(0xFF22D3A8)],
+        labels: ['W', if (hasVAM) 'VA']));
+    if (pwT.isNotEmpty && nomS2.isNotEmpty) charts.add(_buildChart(
+        title: 'PUISSANCE $nomS2 · $windowLabel',
+        series: [pwT, if (hasVAT) pvaT],
+        colors: [const Color(0xFF3B82F6), const Color(0xFFA855F7)],
+        labels: ['W', if (hasVAT) 'VA']));
+    if (tempBufs != null) for (var i = 0; i < 4; i++) {
+      if (tempBufs[i].isNotEmpty && i < _capteurInfos.length && _capteurInfos[i].actif)
+        charts.add(_buildChart(
+            title: 'TEMPÉRATURE · ${_capteurInfos[i].nom.toUpperCase()}',
+            series: [tempBufs[i]], colors: [tc[i]], labels: [_capteurInfos[i].nom], unit: '°C'));
+    }
+    // Températures depuis histo (48h/1an)
+    if (tempsList != null) for (var i = 0; i < tempsList.length; i++) {
+      if (tempsList[i].isNotEmpty) {
+        final nom = i < _capteurInfos.length ? _capteurInfos[i].nom : 'Capteur ${i+1}';
+        charts.add(_buildChart(
+            title: 'TEMPÉRATURE · ${nom.toUpperCase()}',
+            series: [tempsList[i]], colors: [tc[i % tc.length]], labels: [nom], unit: '°C'));
+      }
+    }
+    // Ouvertures depuis buffer 10mn
+    if (ouvBufs != null && modules != null) for (var mi = 0; mi < modules.length; mi++) {
+      final buf = ouvBufs[modules[mi].numAction] ?? [];
+      if (buf.isNotEmpty) charts.add(_buildChart(
+          title: 'OUVERTURE · ${modules[mi].nom.toUpperCase()}',
+          series: [buf], colors: [oc[mi % oc.length]], labels: [modules[mi].nom],
+          unit: '%', forceMinY: 0, forceMaxY: 100));
+    }
+    // Ouvertures depuis histo (48h/1an)
+    if (ouvsList != null) for (var i = 0; i < ouvsList.length; i++) {
+      if (ouvsList[i].isNotEmpty) {
+        // Utiliser ouvsNoms si disponible (48h avec noms réels), sinon fallback modules
+        final nom = (ouvsNoms != null && i < ouvsNoms.length)
+            ? ouvsNoms[i]
+            : (i < _modules.length ? _modules[i].nom : 'Module ${i+1}');
+        charts.add(_buildChart(
+            title: 'OUVERTURE · ${nom.toUpperCase()}',
+            series: [ouvsList[i]], colors: [oc[i % oc.length]], labels: [nom],
+            unit: '%', forceMinY: 0, forceMaxY: 100));
+      }
+    }
+    if (charts.isEmpty) return Center(child: Text('Aucune donnée ($status)',
+        style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278))));
+    return SingleChildScrollView(padding: const EdgeInsets.only(top: 16, bottom: 24),
+        child: Column(children: charts));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A0F1A),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF111827), elevation: 0,
+        leading: IconButton(
+            icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF5A6278), size: 18),
+            onPressed: () => Navigator.pop(context)),
+        title: Text(widget.title, style: const TextStyle(fontSize: 13,
+            fontWeight: FontWeight.w600, letterSpacing: 1.5, color: Color(0xFFE8EAF0))),
+        bottom: TabBar(
+          controller: _tabCtrl,
+          indicatorColor: const Color(0xFFF97316),
+          labelColor: const Color(0xFFF97316),
+          unselectedLabelColor: const Color(0xFF5A6278),
+          labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          tabs: const [Tab(text: '10 MN'), Tab(text: '48 H'), Tab(text: '1 AN')],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabCtrl,
+        children: [
+          _buildTabContent(loading: _loading10, status: _status10,
+              pwM: _pwM10, pvaM: _pvaM10, pwT: _pwT10, pvaT: _pvaT10,
+              tempBufs: _tempBufs10, ouvBufs: _ouvBufs, modules: _modules,
+              windowLabel: '10 MN'),
+          _buildTabContent(loading: _loading48, status: _status48,
+              pwM: _pwM48, pvaM: _pvaM48, pwT: _pwT48, pvaT: _pvaT48,
+              tempsList: _temps48, ouvsList: _ouvs48, ouvsNoms: _ouvNoms48,
+              windowLabel: '48 H'),
+          // ── Onglet 1 AN ─────────────────────────────────────────────────
+          _loading1an
+              ? const Center(child: CircularProgressIndicator(
+              color: Color(0xFFF97316), strokeWidth: 2))
+              : SingleChildScrollView(
+            padding: const EdgeInsets.only(top: 16, bottom: 24),
+            child: Column(children: [
+              _buildHistoBar(_entries1an),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Entrée historique annuelle ─────────────────────────────────────────────────
+class _Histo1anEntry {
+  final String date;     // "20260717"
+  final double soutire;  // Wh soutires sonde mobile
+  final double injecte;  // Wh injectes sonde mobile
+  final double soutire2; // Wh soutires sonde fixe
+  final double injecte2; // Wh injectes sonde fixe
+  final double duration; // Durée de mesure en heures (~24h normalement)
+  final bool   isReset;  // true si journée incomplète suite à reset
+  const _Histo1anEntry({
+    required this.date,
+    required this.soutire,
+    required this.injecte,
+    this.soutire2 = 0.0,
+    this.injecte2 = 0.0,
+    this.duration = 24.0,
+    this.isReset  = false,
+  });
 }
