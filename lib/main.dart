@@ -34,7 +34,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '3.5.4';
+const String appVersion = '3.5.5';
 const String RS = '\x1e'; // Record Separator
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
@@ -527,11 +527,13 @@ class _HomeScreenState extends State<HomeScreen> {
         if (v != null) routerVer = (v / 100).toStringAsFixed(2);
         nomSonde1 = (data['nomSondeMobile'] ?? '').toString();
         nomSonde2 = (data['nomSondeFixe']  ?? '').toString();
-        nomPpos   = (data['nomSfixePpos']  ?? 'Soutiré').toString();
-        nomPneg   = (data['nomSfixePneg']  ?? 'Injecté').toString();
-        // Source sans sonde fixe (triphasé, compteur externe...) → pas de 2e sonde
+        nomPpos   = (data['nomSfixePpos']  ?? '').toString();
+        nomPneg   = (data['nomSfixePneg']  ?? '').toString();
+        // Source sans sonde fixe → pas de 2e sonde
         final source = (data['Source'] ?? '').toString();
         if (source == 'Ext' || source == 'ShellyPro') nomSonde2 = '';
+        // Si les deux labels pos et neg sont vides → pas de 2e sonde non plus
+        if (nomPpos.isEmpty && nomPneg.isEmpty) nomSonde2 = '';
       } catch (_) {}
       if (mounted) setState(() {
         _espStates[idx] = _espStates[idx].copyWith(
@@ -779,13 +781,18 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(child: Divider(color: Colors.white.withOpacity(0.07), height: 1)),
         ]),
         const SizedBox(height: 10),
-        Row(children: [
-          Expanded(child: PowerCard(label: state.nomPpos,
-              value: state.pwsT, color: const Color(0xFFF43F5E))),
-          const SizedBox(width: 10),
-          Expanded(child: PowerCard(label: state.nomPneg,
-              value: state.pwiT, color: const Color(0xFF22D3A8))),
-        ]),
+        // Cards : uniquement si le label correspondant est renseigné
+        if (state.nomPpos.isNotEmpty || state.nomPneg.isNotEmpty)
+          Row(children: [
+            if (state.nomPpos.isNotEmpty)
+              Expanded(child: PowerCard(label: state.nomPpos,
+                  value: state.pwsT, color: const Color(0xFFF43F5E))),
+            if (state.nomPpos.isNotEmpty && state.nomPneg.isNotEmpty)
+              const SizedBox(width: 10),
+            if (state.nomPneg.isNotEmpty)
+              Expanded(child: PowerCard(label: state.nomPneg,
+                  value: state.pwiT, color: const Color(0xFF22D3A8))),
+          ]),
       ],
     );
   }
