@@ -36,6 +36,7 @@ v3.5.3 - Nouvelle gestion Mono/Multisites pour les puissances & Affichage Capteu
 
 v3.5.4 - Choix des capteurs de température à afficher
 
+v3.5.5 - Gestion affichage/masquage de la 2e Sonde selon les libellés
 
 --------
 
