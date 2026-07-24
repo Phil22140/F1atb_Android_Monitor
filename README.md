@@ -40,6 +40,8 @@ v3.5.5 - Gestion affichage/masquage de la 2e Sonde selon les libellés
 
 v4.0.20 - Graphiques 10mn/48h/1an
 
+v4.0.27 - Couleur textes configurable, toggle sélection jauges
+
 --------
 
 
