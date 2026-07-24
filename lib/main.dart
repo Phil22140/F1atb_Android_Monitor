@@ -35,8 +35,21 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.0.20';
+const String appVersion = '4.0.27';
 const String RS = '\x1e'; // Record Separator
+
+// Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
+Color appLabelColor = const Color(0xFF5A6278);
+
+// Presets couleur des labels secondaires (partagés avec ConfigSheet)
+const List<(Color, String)> kLabelColorPresets = [
+  (Color(0xFF5A6278), 'Défaut'),
+  (Color(0xFF8A9BB8), 'Clair'),
+  (Color(0xFFB8C5D4), 'Très clair'),
+  (Color(0xFFE8EAF0), 'Lumineux'),
+  (Color(0xFFFFFFFF), 'Blanc'),
+  (Color(0xFFF97316), 'Orange'),
+];
 
 // ── Parsing /ajax_data ────────────────────────────────────────────────────────
 Map<String, double> parsePuissances(String body) {
@@ -285,7 +298,8 @@ class _HomeScreenState extends State<HomeScreen> {
   List<EspState>  _espStates  = [];
   String _orientationMode = 'auto';
   String _displayMode     = 'multi'; // 'multi' | 'single'
-  bool   _multiSites      = false;   // false=site unique, true=multisites
+  bool   _multiSites      = false;
+  Color  _uiLabelColor    = const Color(0xFF5A6278); // couleur des textes secondaires   // false=site unique, true=multisites
   int _currentPage = 0;
   int? _singleSelectedId;  // encodé : espIdx * 1000 + numAction
   late PageController _pageController;
@@ -327,6 +341,8 @@ class _HomeScreenState extends State<HomeScreen> {
         final dm      = (data['display_mode'] as String?) ?? 'multi';
         _displayMode  = dm;
         _multiSites   = (data['multi_sites'] as bool?) ?? false;
+        final colorVal = data['text_color'] as int?;
+        if (colorVal != null) { _uiLabelColor = Color(colorVal); appLabelColor = Color(colorVal); }
         final list    = (data['configs'] as List).cast<Map<String, dynamic>>();
         for (final c in list) {
           configs.add(EspConfig(
@@ -422,9 +438,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveConfig(List<EspConfig> configs, String orientation,
-      String displayMode, bool multiSites) async {
-    _displayMode = displayMode;
-    _multiSites  = multiSites;
+      String displayMode, bool multiSites, Color labelColor) async {
+    _displayMode    = displayMode;
+    _multiSites     = multiSites;
+    _uiLabelColor   = labelColor;
+    appLabelColor   = labelColor;
     // ── Sauvegarde dans un fichier JSON (synchrone = garanti sur disque) ───
     try {
       final file    = await _configFile;
@@ -432,6 +450,7 @@ class _HomeScreenState extends State<HomeScreen> {
         'orientation':  orientation,
         'display_mode': _displayMode,
         'multi_sites':  _multiSites,
+        'text_color':   _uiLabelColor.value,
         'configs': configs.map((c) {
           final map = <String, dynamic>{
             'name': c.name,
@@ -616,7 +635,10 @@ class _HomeScreenState extends State<HomeScreen> {
   void _selectModule(int espIdx, int numAction) {
     if (espIdx >= _espStates.length) return;
     setState(() {
-      _espStates[espIdx] = _espStates[espIdx].copyWith(selectedNumAction: numAction);
+      final alreadySelected = _espStates[espIdx].selectedNumAction == numAction;
+      _espStates[espIdx] = alreadySelected
+          ? _espStates[espIdx].copyWith(clearSelected: true)
+          : _espStates[espIdx].copyWith(selectedNumAction: numAction);
     });
   }
 
@@ -682,8 +704,9 @@ class _HomeScreenState extends State<HomeScreen> {
         currentOrientation: _orientationMode,
         currentDisplayMode: _displayMode,
         currentMultiSites:  _multiSites,
-        onSave: (configs, orientation, displayMode, multiSites) async {
-          await _saveConfig(configs, orientation, displayMode, multiSites);
+        currentLabelColor:  _uiLabelColor,
+        onSave: (configs, orientation, displayMode, multiSites, labelColor) async {
+          await _saveConfig(configs, orientation, displayMode, multiSites, labelColor);
           if (mounted) Navigator.pop(context);
         },
       ),
@@ -707,8 +730,8 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(width: 12),
             Expanded(
               child: Text(cfg.name,
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                      letterSpacing: 1.5, color: Color(0xFF5A6278))),
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      letterSpacing: 1.5, color: appLabelColor)),
             ),
           ],
         ),
@@ -748,8 +771,7 @@ class _HomeScreenState extends State<HomeScreen> {
         modules.first.heureEquiv != null) {
       return Text(
         'équivalent à ${modules.first.heureEquiv} à 100%',
-        style: const TextStyle(
-            fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
+        style: TextStyle(fontSize: 12, color: appLabelColor, fontFamily: 'monospace'),
       );
     }
     return const SizedBox.shrink();
@@ -758,10 +780,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildPowerCards(EspState state) {
     return Row(children: [
       Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
-          color: const Color(0xFFF43F5E))),
+          color: const Color(0xFFF43F5E), labelColor: appLabelColor)),
       const SizedBox(width: 10),
       Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
-          color: const Color(0xFF22D3A8))),
+          color: const Color(0xFF22D3A8), labelColor: appLabelColor)),
     ]);
   }
 
@@ -776,8 +798,8 @@ class _HomeScreenState extends State<HomeScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Text(state.nomSonde2.toUpperCase(),
-                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                    letterSpacing: 1.4, color: Color(0xFF5A6278))),
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                    letterSpacing: 1.4, color: appLabelColor)),
           ),
           Expanded(child: Divider(color: Colors.white.withOpacity(0.07), height: 1)),
         ]),
@@ -829,12 +851,12 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       const SizedBox(width: 7),
       Flexible(child: Text(state.statusTxt, textAlign: TextAlign.center,
-          style: const TextStyle(
-              fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace'))),
+          style: TextStyle(
+              fontSize: 11, color: appLabelColor, fontFamily: 'monospace'))),
       const SizedBox(width: 12),
       Text(verStr,
-          style: const TextStyle(
-              fontSize: 11, color: Color(0xFF3A4258), fontFamily: 'monospace')),
+          style: TextStyle(
+              fontSize: 11, color: appLabelColor.withOpacity(0.6), fontFamily: 'monospace')),
     ]);
   }
 
@@ -893,11 +915,11 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
             child: Text('Graphiques de quel ESP ?',
                 style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                    letterSpacing: 2, color: Color(0xFF5A6278))),
+                    letterSpacing: 2, color: appLabelColor)),
           ),
           for (var i = 0; i < _espConfigs.length; i++)
             ListTile(
@@ -982,18 +1004,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 decoration: const BoxDecoration(shape: BoxShape.circle,
                     color: Color(0xFFF43F5E))),
             const SizedBox(width: 5),
-            const Text('SOUTIRÉ', style: TextStyle(fontSize: 10,
+            Text('SOUTIRÉ', style: TextStyle(fontSize: 10,
                 fontWeight: FontWeight.w600, letterSpacing: 1.4,
-                color: Color(0xFF5A6278))),
+                color: appLabelColor)),
           ])),
           Expanded(child: Row(children: [
             Container(width: 6, height: 6,
                 decoration: const BoxDecoration(shape: BoxShape.circle,
                     color: Color(0xFF22D3A8))),
             const SizedBox(width: 5),
-            const Text('INJECTÉ', style: TextStyle(fontSize: 10,
+            Text('INJECTÉ', style: TextStyle(fontSize: 10,
                 fontWeight: FontWeight.w600, letterSpacing: 1.4,
-                color: Color(0xFF5A6278))),
+                color: appLabelColor)),
           ])),
         ]),
         const SizedBox(height: 8),
@@ -1016,7 +1038,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Row(children: [
       Flexible(child: Text(espName,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 10, color: Color(0xFF5A6278)))),
+          style: TextStyle(fontSize: 10, color: appLabelColor))),
       const SizedBox(width: 4),
       Text('${value.round()} W',
           style: TextStyle(fontFamily: 'monospace', fontSize: 15,
@@ -1053,8 +1075,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Text(_espConfigs[i].name.toUpperCase(),
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                      letterSpacing: 1.3, color: Color(0xFF5A6278))),
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                      letterSpacing: 1.3, color: appLabelColor)),
             ),
           CapteursRow(
             indices: actifs,
@@ -1094,13 +1116,14 @@ class _HomeScreenState extends State<HomeScreen> {
       child: ModulesGrid(
         modules: combined,
         selectedNumAction: _singleSelectedId,
-        onSelect: (id) => setState(() => _singleSelectedId = id),
+        onSelect: (id) => setState(() =>
+        _singleSelectedId = _singleSelectedId == id ? null : id),
       ),
     );
 
     Widget equiv = (!multiMod && combined.isNotEmpty && combined.first.heureEquiv != null)
         ? Text('équivalent à ${combined.first.heureEquiv} à 100%',
-        style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'))
+        style: TextStyle(fontSize: 12, color: appLabelColor, fontFamily: 'monospace'))
         : const SizedBox.shrink();
 
     Widget forceW = IgnorePointer(
@@ -1133,10 +1156,10 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       const SizedBox(width: 7),
       Flexible(child: Text(statusTxt,
-          style: const TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace'))),
+          style: TextStyle(fontSize: 11, color: appLabelColor, fontFamily: 'monospace'))),
       const SizedBox(width: 12),
-      const Text('v$appVersion',
-          style: TextStyle(fontSize: 11, color: Color(0xFF3A4258), fontFamily: 'monospace')),
+      Text('v$appVersion',
+          style: TextStyle(fontSize: 11, color: appLabelColor.withOpacity(0.7), fontFamily: 'monospace')),
     ]);
 
     Widget buildPortraitSingle() => Stack(children: [
@@ -1588,9 +1611,9 @@ class GaugeWidget extends StatelessWidget {
                 ),
               ),
               if (showLabel)
-                const Text(
+                Text(
                   'ouverture %',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278), fontFamily: 'monospace'),
+                  style: TextStyle(fontSize: 12, color: appLabelColor, fontFamily: 'monospace'),
                 ),
             ],
           ),
@@ -1774,7 +1797,7 @@ class _ModuleGaugeTile extends StatelessWidget {
               style: TextStyle(
                 fontSize: size > 120 ? 11 : 9,
                 fontWeight: FontWeight.w500,
-                color: const Color(0xFF5A6278),
+                color: appLabelColor,
               ),
             ),
             // Équivalence heure (si disponible)
@@ -1786,7 +1809,7 @@ class _ModuleGaugeTile extends StatelessWidget {
                 style: TextStyle(
                   fontSize: size > 120 ? 10 : 8,
                   fontFamily: 'monospace',
-                  color: const Color(0xFF3A4258),
+                  color: appLabelColor.withOpacity(0.7),
                 ),
               ),
             ],
@@ -1847,9 +1870,9 @@ class _CapteurBox extends StatelessWidget {
             maxLines: 2,
             textAlign: TextAlign.center,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 10, fontWeight: FontWeight.w500,
-              color: Color(0xFF5A6278), height: 1.15,
+              color: appLabelColor, height: 1.15,
             ),
           ),
           const SizedBox(height: 4),
@@ -1869,8 +1892,10 @@ class _CapteurBox extends StatelessWidget {
 class PowerCard extends StatelessWidget {
   final String label;
   final double value;
-  final Color color;
-  const PowerCard({super.key, required this.label, required this.value, required this.color});
+  final Color  color;
+  final Color  labelColor;
+  const PowerCard({super.key, required this.label, required this.value,
+    required this.color, this.labelColor = const Color(0xFF5A6278)});
 
   @override
   Widget build(BuildContext context) {
@@ -1890,8 +1915,8 @@ class PowerCard extends StatelessWidget {
                   decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
               const SizedBox(width: 5),
               Text(label.toUpperCase(),
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                      letterSpacing: 1.4, color: Color(0xFF5A6278))),
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                      letterSpacing: 1.4, color: labelColor)),
             ],
           ),
           const SizedBox(height: 6),
@@ -1903,8 +1928,8 @@ class PowerCard extends StatelessWidget {
                   style: TextStyle(fontFamily: 'monospace', fontSize: 30,
                       fontWeight: FontWeight.w500, color: color, height: 1)),
               const SizedBox(width: 4),
-              const Text('W',
-                  style: TextStyle(fontSize: 11, color: Color(0xFF5A6278), fontFamily: 'monospace')),
+              Text('W',
+                  style: TextStyle(fontSize: 11, color: labelColor, fontFamily: 'monospace')),
             ],
           ),
         ],
@@ -1935,7 +1960,7 @@ class ForceWidget extends StatelessWidget {
         : Colors.white.withOpacity(0.08);
     final Color labelColor  = isOn  ? const Color(0xFF22C55E)
         : isOff ? const Color(0xFFF43F5E)
-        : const Color(0xFF5A6278);
+        : appLabelColor;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -1999,7 +2024,7 @@ class ForceWidget extends StatelessWidget {
             const SizedBox(width: 8),
             _ForceBtn(
               label: 'Annuler',
-              color: const Color(0xFF5A6278),
+              color: appLabelColor,
               bg: const Color(0xFF1F2937),
               onTap: () => onForce(-1), // opposé → repasse en auto
             ),
@@ -2013,7 +2038,7 @@ class ForceWidget extends StatelessWidget {
             const SizedBox(width: 8),
             _ForceBtn(
               label: 'Annuler',
-              color: const Color(0xFF5A6278),
+              color: appLabelColor,
               bg: const Color(0xFF1F2937),
               onTap: () => onForce(1),  // opposé → repasse en auto
             ),
@@ -2077,13 +2102,15 @@ class ConfigSheet extends StatefulWidget {
   final String currentOrientation;
   final String currentDisplayMode;
   final bool   currentMultiSites;
-  final Future<void> Function(List<EspConfig>, String, String, bool) onSave;
+  final Color  currentLabelColor;
+  final Future<void> Function(List<EspConfig>, String, String, bool, Color) onSave;
   const ConfigSheet({
     super.key,
     required this.currentConfigs,
     required this.currentOrientation,
     required this.currentDisplayMode,
     required this.currentMultiSites,
+    required this.currentLabelColor,
     required this.onSave,
   });
 
@@ -2096,6 +2123,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late String _orientation;
   late String _displayMode;
   late bool   _multiSites;
+  late Color  _labelColor;
   late int _count;
 
   // État du test de connexion par ESP
@@ -2109,6 +2137,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _orientation = widget.currentOrientation;
     _displayMode = widget.currentDisplayMode;
     _multiSites  = widget.currentMultiSites;
+    _labelColor  = widget.currentLabelColor;
     _count = widget.currentConfigs.length;
     _ctrls = widget.currentConfigs.map((c) => {
       'name': TextEditingController(text: c.name),
@@ -2223,7 +2252,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
   InputDecoration _inputDeco(String hint) => InputDecoration(
     hintText: hint,
-    hintStyle: const TextStyle(color: Color(0xFF5A6278)),
+    hintStyle: TextStyle(color: appLabelColor),
     filled: true,
     fillColor: const Color(0xFF0A0F1A),
     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -2255,10 +2284,10 @@ class _ConfigSheetState extends State<ConfigSheet> {
           children: [
             // ── Titre + compteur ESP ─────────────────────────────────────────
             Row(children: [
-              const Expanded(
+              Expanded(
                 child: Text('Configuration',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                        letterSpacing: 2.5, color: Color(0xFF5A6278))),
+                        letterSpacing: 2.5, color: appLabelColor)),
               ),
               Container(
                 decoration: BoxDecoration(
@@ -2291,11 +2320,11 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text('ESP ${i + 1}',
-                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                          letterSpacing: 1.5, color: Color(0xFF5A6278))),
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                          letterSpacing: 1.5, color: appLabelColor)),
                 ),
               // Nom
-              const Text('Nom', style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              Text('Nom', style: TextStyle(fontSize: 12, color: appLabelColor)),
               const SizedBox(height: 4),
               TextField(
                 controller: _ctrls[i]['name'],
@@ -2304,7 +2333,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
               ),
               const SizedBox(height: 8),
               // URL
-              const Text('URL', style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              Text('URL', style: TextStyle(fontSize: 12, color: appLabelColor)),
               const SizedBox(height: 4),
               TextField(
                 controller: _ctrls[i]['url'],
@@ -2316,8 +2345,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
               ),
               const SizedBox(height: 8),
               // Mot de passe
-              const Text('Mot de passe (optionnel)',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              Text('Mot de passe (optionnel)',
+                  style: TextStyle(fontSize: 12, color: appLabelColor)),
               const SizedBox(height: 4),
               TextField(
                 controller: _ctrls[i]['pwd'],
@@ -2404,9 +2433,9 @@ class _ConfigSheetState extends State<ConfigSheet> {
                   // ── Capteurs de température ──────────────────────────────
                   if (_testedTemps[i] != null && _testedTemps[i]!.isNotEmpty) ...[
                     const SizedBox(height: 8),
-                    const Text('Capteurs de température',
+                    Text('Capteurs de température',
                         style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                            letterSpacing: 1.2, color: Color(0xFF5A6278))),
+                            letterSpacing: 1.2, color: appLabelColor)),
                     for (final t in _testedTemps[i]!)
                       CheckboxListTile(
                         value: t.enabled,
@@ -2428,10 +2457,20 @@ class _ConfigSheetState extends State<ConfigSheet> {
               const SizedBox(height: 16),
             ],
 
+            // ── Couleur des textes ───────────────────────────────────────────
+            Text('Couleur des textes',
+                style: TextStyle(fontSize: 12, color: appLabelColor)),
+            const SizedBox(height: 8),
+            _LabelColorPicker(
+              value: _labelColor,
+              onChanged: (c) => setState(() => _labelColor = c),
+            ),
+            const SizedBox(height: 16),
+
             // ── Affichage (uniquement si plusieurs ESP) ──────────────────────
             if (_count > 1) ...[
-              const Text('Affichage',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              Text('Affichage',
+                  style: TextStyle(fontSize: 12, color: appLabelColor)),
               const SizedBox(height: 8),
               _DisplayModeToggle(
                 value: _displayMode,
@@ -2447,9 +2486,9 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 onChanged: (v) => setState(() => _multiSites = v!),
                 title: const Text('Multisites',
                     style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
-                subtitle: const Text(
+                subtitle: Text(
                     'Affiche le Soutiré/Injecté de chaque ESP séparément',
-                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                    style: TextStyle(fontSize: 11, color: appLabelColor)),
                 activeColor: const Color(0xFFF97316),
                 side: BorderSide(color: Colors.white.withOpacity(0.3)),
                 contentPadding: EdgeInsets.zero,
@@ -2459,8 +2498,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
             ],
 
             // ── Orientation ──────────────────────────────────────────────────
-            const Text('Orientation',
-                style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+            Text('Orientation',
+                style: TextStyle(fontSize: 12, color: appLabelColor)),
             const SizedBox(height: 8),
             _OrientationToggle(
               value: _orientation,
@@ -2520,7 +2559,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       enabledTempIndices: enabledTemps,
                     );
                   }).toList();
-                  await widget.onSave(configs, _orientation, _displayMode, _multiSites);
+                  await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
@@ -2547,8 +2586,50 @@ class _ConfigSheetState extends State<ConfigSheet> {
         alignment: Alignment.center,
         child: Text(label,
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600,
-                color: enabled ? const Color(0xFFE8EAF0) : const Color(0xFF3A4258))),
+                color: enabled ? const Color(0xFFE8EAF0) : appLabelColor.withOpacity(0.7))),
       ),
+    );
+  }
+}
+
+// ── Sélecteur de couleur des textes secondaires ───────────────────────────────
+class _LabelColorPicker extends StatelessWidget {
+  final Color value;
+  final void Function(Color) onChanged;
+  const _LabelColorPicker({required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        for (final (color, label) in kLabelColorPresets)
+          GestureDetector(
+            onTap: () => onChanged(color),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 34, height: 34,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: value == color
+                        ? const Color(0xFFF97316) : Colors.white.withOpacity(0.15),
+                    width: value == color ? 2.5 : 1,
+                  ),
+                  boxShadow: value == color ? [BoxShadow(
+                      color: const Color(0xFFF97316).withOpacity(0.5),
+                      blurRadius: 6)] : null,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(label, style: TextStyle(
+                  fontSize: 9,
+                  color: value == color ? const Color(0xFFF97316) : appLabelColor)),
+            ]),
+          ),
+      ],
     );
   }
 }
@@ -2593,7 +2674,7 @@ class _DisplayModeToggle extends StatelessWidget {
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
                       color: value == _options[i].$1
-                          ? Colors.white : const Color(0xFF5A6278)),
+                          ? Colors.white : appLabelColor),
                 ),
               ),
             ),
@@ -2647,7 +2728,7 @@ class _OrientationToggle extends StatelessWidget {
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
                       color: value == _options[i].$1
-                          ? Colors.white : const Color(0xFF5A6278)),
+                          ? Colors.white : appLabelColor),
                 ),
               ),
             ),
@@ -3029,14 +3110,14 @@ class _ChartsPageState extends State<ChartsPage>
           border: Border.all(color: Colors.white.withOpacity(0.08))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Expanded(child: Text(title, style: const TextStyle(fontSize: 10,
-              fontWeight: FontWeight.w600, letterSpacing: 1.5, color: Color(0xFF5A6278)))),
+          Expanded(child: Text(title, style: TextStyle(fontSize: 10,
+              fontWeight: FontWeight.w600, letterSpacing: 1.5, color: appLabelColor))),
           for (var i = 0; i < labels.length; i++) ...[
             if (i > 0) const SizedBox(width: 10),
             Container(width: 8, height: 8, decoration: BoxDecoration(
                 color: colors[i % colors.length], shape: BoxShape.circle)),
             const SizedBox(width: 4),
-            Text(labels[i], style: const TextStyle(fontSize: 10, color: Color(0xFF5A6278))),
+            Text(labels[i], style: TextStyle(fontSize: 10, color: appLabelColor)),
           ],
         ]),
         const SizedBox(height: 10),
@@ -3050,7 +3131,7 @@ class _ChartsPageState extends State<ChartsPage>
           titlesData: FlTitlesData(
             leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 38,
                 getTitlesWidget: (v, _) => Text('${v.toInt()}$unit',
-                    style: const TextStyle(fontSize: 9, color: Color(0xFF5A6278))))),
+                    style: TextStyle(fontSize: 9, color: appLabelColor)))),
             rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
             topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
             bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -3070,7 +3151,7 @@ class _ChartsPageState extends State<ChartsPage>
   Widget _buildHistoBar(List<_Histo1anEntry> entries) {
     if (entries.isEmpty) {
       return Center(child: Text('Aucune donnée ($_status1an)',
-          style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278))));
+          style: TextStyle(fontSize: 12, color: appLabelColor)));
     }
 
     String labelDate(String d) =>
@@ -3098,7 +3179,7 @@ class _ChartsPageState extends State<ChartsPage>
         leftTitles: AxisTitles(sideTitles: SideTitles(
           showTitles: true, reservedSize: 44,
           getTitlesWidget: (v, _) => Text('${(v/1000).toStringAsFixed(1)}k',
-              style: const TextStyle(fontSize: 9, color: Color(0xFF5A6278))),
+              style: TextStyle(fontSize: 9, color: appLabelColor)),
         )),
         rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
         topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -3113,7 +3194,7 @@ class _ChartsPageState extends State<ChartsPage>
             return Transform.rotate(
               angle: -0.5,
               child: Text(labelDate(entries[i].date),
-                  style: const TextStyle(fontSize: 8, color: Color(0xFF5A6278))),
+                  style: TextStyle(fontSize: 8, color: appLabelColor)),
             );
           },
         )),
@@ -3173,18 +3254,18 @@ class _ChartsPageState extends State<ChartsPage>
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          const Expanded(child: Text('ÉNERGIE JOUR · 1 AN',
+          Expanded(child: Text('ÉNERGIE JOUR · 1 AN',
               style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                  letterSpacing: 1.5, color: Color(0xFF5A6278)))),
+                  letterSpacing: 1.5, color: appLabelColor))),
           Container(width: 8, height: 8, decoration: const BoxDecoration(
               color: Color(0xFFF43F5E), shape: BoxShape.circle)),
           const SizedBox(width: 4),
-          const Text('Wh soutire', style: TextStyle(fontSize: 10, color: Color(0xFF5A6278))),
+          Text('Wh soutire', style: TextStyle(fontSize: 10, color: appLabelColor)),
           const SizedBox(width: 10),
           Container(width: 8, height: 8, decoration: const BoxDecoration(
               color: Color(0xFF22D3A8), shape: BoxShape.circle)),
           const SizedBox(width: 4),
-          const Text('Wh injecte', style: TextStyle(fontSize: 10, color: Color(0xFF5A6278))),
+          Text('Wh injecte', style: TextStyle(fontSize: 10, color: appLabelColor)),
         ]),
         const SizedBox(height: 10),
         SingleChildScrollView(
@@ -3264,7 +3345,7 @@ class _ChartsPageState extends State<ChartsPage>
       }
     }
     if (charts.isEmpty) return Center(child: Text('Aucune donnée ($status)',
-        style: const TextStyle(fontSize: 12, color: Color(0xFF5A6278))));
+        style: TextStyle(fontSize: 12, color: appLabelColor)));
     return SingleChildScrollView(padding: const EdgeInsets.only(top: 16, bottom: 24),
         child: Column(children: charts));
   }
@@ -3276,7 +3357,7 @@ class _ChartsPageState extends State<ChartsPage>
       appBar: AppBar(
         backgroundColor: const Color(0xFF111827), elevation: 0,
         leading: IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF5A6278), size: 18),
+            icon: Icon(Icons.arrow_back_ios_new, color: appLabelColor, size: 18),
             onPressed: () => Navigator.pop(context)),
         title: Text(widget.title, style: const TextStyle(fontSize: 13,
             fontWeight: FontWeight.w600, letterSpacing: 1.5, color: Color(0xFFE8EAF0))),
@@ -3284,7 +3365,7 @@ class _ChartsPageState extends State<ChartsPage>
           controller: _tabCtrl,
           indicatorColor: const Color(0xFFF97316),
           labelColor: const Color(0xFFF97316),
-          unselectedLabelColor: const Color(0xFF5A6278),
+          unselectedLabelColor: appLabelColor,
           labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
           tabs: const [Tab(text: '10 MN'), Tab(text: '48 H'), Tab(text: '1 AN')],
         ),
