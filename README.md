@@ -42,6 +42,8 @@ v4.0.20 - Graphiques 10mn/48h/1an
 
 v4.0.27 - Couleur textes configurable, toggle sélection jauges
 
+v4.0.30 - Couleurs Tarif RTE
+
 --------
 
 
