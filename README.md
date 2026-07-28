@@ -44,6 +44,8 @@ v4.0.27 - Couleur textes configurable, toggle sélection jauges
 
 v4.0.30 - Couleurs Tarif RTE
 
+v4.0.31 - Correction de Bug affichage & Safe Area
+
 --------
 
 
