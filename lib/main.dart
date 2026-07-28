@@ -35,7 +35,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.0.27';
+const String appVersion = '4.0.30';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -65,6 +65,28 @@ Map<String, double> parsePuissances(String body) {
     pwiT = g2.length > 1 ? (double.tryParse(g2[1].trim()) ?? 0.0) : 0.0;
   }
   return {'pws': pws, 'pwi': pwi, 'pwsT': pwsT, 'pwiT': pwiT};
+}
+
+// ── Parsing Tempo RTE (couleur tarifaire) ─────────────────────────────────────
+// J : pattern TEMPO_(BLEU|BLANC|ROUGE) dans G0 de ajax_data
+// J+1 : G0[4] = hex → val ~/4 : 1=Bleu 2=Blanc 3=Rouge
+String parseTempoJour(String body) {
+  final m = RegExp(r'TEMPO_(BLEU|BLANC|ROUGE)').firstMatch(body);
+  return m?.group(1) ?? '';
+}
+
+String parseTempoJ1(String body) {
+  // Nettoyer GS et splitter par RS → G0[4] = 5e champ
+  final fields = body.replaceAll(GS, '').split(RS);
+  if (fields.length <= 4) return '';
+  final hex = fields[4].trim().replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+  if (hex.isEmpty) return '';
+  final val = int.tryParse(hex, radix: 16) ?? 0;
+  final idx = val ~/ 4;
+  if (idx == 1) return 'BLEU';
+  if (idx == 2) return 'BLANC';
+  if (idx == 3) return 'ROUGE';
+  return '';
 }
 
 // ── Parsing des températures (G0[5] de /ajax_data) ────────────────────────────
@@ -221,10 +243,12 @@ class EspState {
   final double pwi;
   final double pwsT;   // puissance soutiree sonde fixe (Triac)
   final double pwiT;   // puissance injectee sonde fixe (Triac)
-  final String nomSonde1; // nom sonde mobile (G1)
-  final String nomSonde2; // nom sonde fixe (G2) — vide = pas de seconde sonde
-  final String nomPpos;   // label puissance positive sonde fixe (ex: "Soutiré")
-  final String nomPneg;   // label puissance négative sonde fixe (ex: "Injecté")
+  final String nomSonde1;
+  final String nomSonde2;
+  final String nomPpos;
+  final String nomPneg;
+  final String tempoJour; // 'BLEU', 'BLANC', 'ROUGE', '' si absent
+  final String tempoJ1;   // idem pour J+1
   final bool ok;
   final String statusTxt;
   final String? routerVersion;
@@ -242,6 +266,8 @@ class EspState {
     this.nomSonde2 = '',
     this.nomPpos = 'Soutiré',
     this.nomPneg = 'Injecté',
+    this.tempoJour = '',
+    this.tempoJ1 = '',
     this.ok = false,
     this.statusTxt = 'connexion…',
     this.routerVersion,
@@ -262,6 +288,8 @@ class EspState {
     String? nomSonde2,
     String? nomPpos,
     String? nomPneg,
+    String? tempoJour,
+    String? tempoJ1,
     bool? ok,
     String? statusTxt,
     String? routerVersion,
@@ -279,6 +307,8 @@ class EspState {
       nomSonde2: nomSonde2 ?? this.nomSonde2,
       nomPpos: nomPpos ?? this.nomPpos,
       nomPneg: nomPneg ?? this.nomPneg,
+      tempoJour: tempoJour ?? this.tempoJour,
+      tempoJ1: tempoJ1 ?? this.tempoJ1,
       ok: ok ?? this.ok,
       statusTxt: statusTxt ?? this.statusTxt,
       routerVersion: routerVersion ?? this.routerVersion,
@@ -582,6 +612,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final pw      = parsePuissances(results[0]);
       final modules = parseActionneurs(results[1]);
       final temps   = parseTemperatures(results[0]);
+      final tj      = parseTempoJour(results[0]);
+      final tj1     = parseTempoJ1(results[0]);
 
       final old = _espStates[idx];
       int? sel = old.selectedNumAction;
@@ -600,6 +632,8 @@ class _HomeScreenState extends State<HomeScreen> {
           pwi:  pw['pwi']!,
           pwsT: pw['pwsT']!,
           pwiT: pw['pwiT']!,
+          tempoJour: tj,
+          tempoJ1:   tj1,
           ok: true,
           statusTxt: 'màj ${TimeOfDay.now().format(context)}',
         );
@@ -777,6 +811,50 @@ class _HomeScreenState extends State<HomeScreen> {
     return const SizedBox.shrink();
   }
 
+  static Color _tempoColor(String t) {
+    if (t == 'BLEU')  return const Color(0xFF00BFFF);
+    if (t == 'BLANC') return const Color(0xFFE8EAF0);
+    if (t == 'ROUGE') return const Color(0xFFF43F5E);
+    return Colors.transparent;
+  }
+
+  static String _tempoLabel(String t) {
+    if (t == 'BLEU')  return 'Bleu';
+    if (t == 'BLANC') return 'Blanc';
+    if (t == 'ROUGE') return 'Rouge';
+    return '';
+  }
+
+  Widget _buildTempoBadge(String t, String label) {
+    final c = _tempoColor(t);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: c.withOpacity(0.15),
+        border: Border.all(color: c.withOpacity(0.6)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Text(label, style: TextStyle(fontSize: 9, color: appLabelColor)),
+        const SizedBox(height: 2),
+        Text(_tempoLabel(t),
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: c)),
+      ]),
+    );
+  }
+
+  // Bandeau Tempo : J et J+1 — affiché seulement si tempoJour non vide
+  Widget _buildTempoWidget(EspState state) {
+    if (state.tempoJour.isEmpty) return const SizedBox.shrink();
+    return Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+      Expanded(child: _buildTempoBadge(state.tempoJour, 'Aujourd\'hui')),
+      if (state.tempoJ1.isNotEmpty) ...[
+        const SizedBox(width: 8),
+        Expanded(child: _buildTempoBadge(state.tempoJ1, 'Demain')),
+      ],
+    ]);
+  }
+
   Widget _buildPowerCards(EspState state) {
     return Row(children: [
       Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
@@ -912,24 +990,26 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: const Color(0xFF111827),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
-            child: Text('Graphiques de quel ESP ?',
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                    letterSpacing: 2, color: appLabelColor)),
-          ),
-          for (var i = 0; i < _espConfigs.length; i++)
-            ListTile(
-              title: Text(_espConfigs[i].name,
-                  style: const TextStyle(color: Color(0xFFE8EAF0))),
-              leading: const Icon(Icons.show_chart, color: Color(0xFFF97316)),
-              onTap: () { Navigator.pop(context); _openCharts(context, i); },
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+              child: Text('Graphiques de quel ESP ?',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                      letterSpacing: 2, color: appLabelColor)),
             ),
-          const SizedBox(height: 8),
-        ],
+            for (var i = 0; i < _espConfigs.length; i++)
+              ListTile(
+                title: Text(_espConfigs[i].name,
+                    style: const TextStyle(color: Color(0xFFE8EAF0))),
+                leading: const Icon(Icons.show_chart, color: Color(0xFFF97316)),
+                onTap: () { Navigator.pop(context); _openCharts(context, i); },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
@@ -1188,9 +1268,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 8),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: _multiSites
-                      ? _buildCombinedPowerCards()
-                      : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    if (_espStates.isNotEmpty && _espStates.first.tempoJour.isNotEmpty) ...[
+                      _buildTempoWidget(_espStates.first),
+                      const SizedBox(height: 6),
+                    ],
+                    _multiSites
+                        ? _buildCombinedPowerCards()
+                        : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
+                  ]),
                 ),
                 const SizedBox(height: 12),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: forceW),
@@ -1391,7 +1477,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: _buildPowerCards(state),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    if (state.tempoJour.isNotEmpty) ...[
+                      _buildTempoWidget(state),
+                      const SizedBox(height: 6),
+                    ],
+                    _buildPowerCards(state),
+                  ]),
                 ),
                 const SizedBox(height: 12),
                 Padding(
@@ -1465,6 +1557,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         infos: state.capteursInfo,
                         temperatures: state.temperatures),
                     const SizedBox(height: 10),
+                  ],
+                  if (state.tempoJour.isNotEmpty) ...[
+                    _buildTempoWidget(state),
+                    const SizedBox(height: 6),
                   ],
                   _buildPowerCards(state),
                   const SizedBox(height: 12),
