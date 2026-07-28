@@ -35,7 +35,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.0.30';
+const String appVersion = '4.0.31';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -1322,6 +1322,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   _buildCombinedTemperatures(),
                   const SizedBox(height: 8),
+                  if (_espStates.isNotEmpty && _espStates.first.tempoJour.isNotEmpty) ...[
+                    _buildTempoWidget(_espStates.first),
+                    const SizedBox(height: 6),
+                  ],
                   _multiSites
                       ? _buildCombinedPowerCards()
                       : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
