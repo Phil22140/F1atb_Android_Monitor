@@ -40,7 +40,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.7.3';
+const String appVersion = '4.7.5';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -2366,6 +2366,33 @@ class _HomeScreenState extends State<HomeScreen> {
     final hasSuno = _solarConfig.sunologyEnabled;
     final hasAp   = _solarConfig.apsystemsEnabled;
 
+    // Total journalier cumulé (kWh) toutes sources activées confondues.
+    // Sunology stocke sa valeur "Jour" en texte déjà formaté par l'API
+    // (ex: "9.4 kWh" ou "24 Wh") — on le reconvertit en kWh numérique
+    // uniquement pour ce cumul, sans changer son propre affichage individuel.
+    double? parseKwhText(String? txt) {
+      if (txt == null) return null;
+      final parts = txt.trim().split(RegExp(r'\s+'));
+      if (parts.length < 2) return null;
+      final val = double.tryParse(parts[0].replaceAll(',', '.'));
+      if (val == null) return null;
+      return parts[1].toLowerCase() == 'wh' ? val / 1000 : val;
+    }
+    double? dailyTotalKwh;
+    if (hasIzy && s.izyTodayKwh != null) dailyTotalKwh = (dailyTotalKwh ?? 0) + s.izyTodayKwh!;
+    if (hasSuno) {
+      final v = parseKwhText(s.sunologyDayTxt);
+      if (v != null) dailyTotalKwh = (dailyTotalKwh ?? 0) + v;
+    }
+    if (hasAp) {
+      final apDaily = s.apsystemsInverters
+          .where((i) => i.todayEnergyKwh != null)
+          .fold<double>(0, (sum, i) => sum + i.todayEnergyKwh!);
+      if (s.apsystemsInverters.any((i) => i.todayEnergyKwh != null)) {
+        dailyTotalKwh = (dailyTotalKwh ?? 0) + apDaily;
+      }
+    }
+
     // Tri des onduleurs EasyPower selon l'ordre choisi par l'utilisateur
     // (par devId, stable même si le nom change) — les onduleurs non
     // répertoriés dans l'ordre (nouveaux, jamais configurés) passent en fin,
@@ -2392,6 +2419,12 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 10),
         PowerGaugeWidget(value: totalPv, hasValue: (s.izyOk || s.sunologyOk || s.apsystemsOk),
             maxValue: _solarConfig.totalCapacityW),
+        if (dailyTotalKwh != null) ...[
+          const SizedBox(height: 4),
+          Text('${dailyTotalKwh.toStringAsFixed(2)} kWh aujourd\'hui',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                  color: appLabelColor)),
+        ],
         const SizedBox(height: 20),
 
         // ── Section Izypower ──────────────────────────────────────────────────
@@ -2543,16 +2576,18 @@ class _HomeScreenState extends State<HomeScreen> {
           // Production Jour / Mois / Total (depuis le début)
           if (s.izyTodayKwh != null || s.izyMonthKwh != null || s.izyLifetimeKwh != null) ...[
             const SizedBox(height: 10),
-            Row(children: [
-              Expanded(child: _solarMiniStat('Jour',
-                  s.izyTodayKwh != null ? '${s.izyTodayKwh!.toStringAsFixed(2)} kWh' : null)),
-              const SizedBox(width: 8),
-              Expanded(child: _solarMiniStat('Mois',
-                  s.izyMonthKwh != null ? '${s.izyMonthKwh!.toStringAsFixed(2)} kWh' : null)),
-              const SizedBox(width: 8),
-              Expanded(child: _solarMiniStat('Total',
-                  s.izyLifetimeKwh != null ? '${s.izyLifetimeKwh!.toStringAsFixed(2)} kWh' : null)),
-            ]),
+            IntrinsicHeight(
+              child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Expanded(child: _solarMiniStat('Jour',
+                    s.izyTodayKwh != null ? '${s.izyTodayKwh!.toStringAsFixed(2)} kWh' : null)),
+                const SizedBox(width: 8),
+                Expanded(child: _solarMiniStat('Mois',
+                    s.izyMonthKwh != null ? '${s.izyMonthKwh!.toStringAsFixed(2)} kWh' : null)),
+                const SizedBox(width: 8),
+                Expanded(child: _solarMiniStat('Total',
+                    s.izyLifetimeKwh != null ? '${s.izyLifetimeKwh!.toStringAsFixed(2)} kWh' : null)),
+              ]),
+            ),
           ],
           const SizedBox(height: 20),
         ],
@@ -2564,17 +2599,21 @@ class _HomeScreenState extends State<HomeScreen> {
           _solarValueCard('Prod. PV', s.sunologyPvW,
               const Color(0xFFFACC15), Icons.solar_power_outlined),
           const SizedBox(height: 10),
-          Row(children: [
-            Expanded(child: _solarMiniStat('Jour', s.sunologyDayTxt)),
-            const SizedBox(width: 8),
-            Expanded(child: _solarMiniStat('Semaine', s.sunologyWeekTxt)),
-          ]),
+          IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(child: _solarMiniStat('Jour', s.sunologyDayTxt)),
+              const SizedBox(width: 8),
+              Expanded(child: _solarMiniStat('Semaine', s.sunologyWeekTxt)),
+            ]),
+          ),
           const SizedBox(height: 8),
-          Row(children: [
-            Expanded(child: _solarMiniStat('Mois', s.sunologyMonthTxt)),
-            const SizedBox(width: 8),
-            Expanded(child: _solarMiniStat('Année', s.sunologyYearTxt)),
-          ]),
+          IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(child: _solarMiniStat('Mois', s.sunologyMonthTxt)),
+              const SizedBox(width: 8),
+              Expanded(child: _solarMiniStat('Année', s.sunologyYearTxt)),
+            ]),
+          ),
           const SizedBox(height: 20),
         ],
 
@@ -2628,13 +2667,15 @@ class _HomeScreenState extends State<HomeScreen> {
                       _pvMiniLabel('PV2', inv.power2W),
                     ]),
                     const SizedBox(height: 10),
-                    Row(children: [
-                      Expanded(child: _solarMiniStat('Jour', kwh(inv.todayEnergyKwh))),
-                      const SizedBox(width: 8),
-                      Expanded(child: _solarMiniStat('Mois', kwh(inv.monthEnergyKwh))),
-                      const SizedBox(width: 8),
-                      Expanded(child: _solarMiniStat('Total', kwh(inv.lifetimeEnergyKwh))),
-                    ]),
+                    IntrinsicHeight(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Expanded(child: _solarMiniStat('Jour', kwh(inv.todayEnergyKwh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Mois', kwh(inv.monthEnergyKwh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Total', kwh(inv.lifetimeEnergyKwh))),
+                      ]),
+                    ),
                   ]),
                 );
               }),
