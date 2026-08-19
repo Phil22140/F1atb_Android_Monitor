@@ -52,6 +52,8 @@ v4.6.3 - Intégration Suivi Solaire pour : Izypower / Sunology / EasyPower(APsys
 
 v4.7.0 - Ajout info date/heure dans graphiques
 
+v4.7.2 - Ajout personnalisation ordre des MO pour Easypower + Correction de bugs
+
 --------
 
 
