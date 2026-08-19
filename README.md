@@ -46,6 +46,10 @@ v4.0.30 - Couleurs Tarif RTE
 
 v4.0.31 - Correction de Bug affichage & Safe Area
 
+v..... - Debug et améliorations non publiées
+
+v4.6.3 - Intégration Suivi Solaire pour : Izypower / Sunology / EasyPower(APsystems)
+
 --------
 
 
