@@ -56,6 +56,11 @@ v4.7.2 - Ajout personnalisation ordre des MO pour Easypower + Correction de bugs
 
 v4.7.3 - Production Jour/Mois/Total Izypower
 
+v4.7.4 - Correction positionnement des affichages
+
+v4.7.5 - Ajout du cumul production journalière sous la jauge
+
+
 --------
 
 
