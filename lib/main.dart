@@ -40,7 +40,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.7.2';
+const String appVersion = '4.7.3';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -354,6 +354,7 @@ class SolarState {
   final int? izyDischargeRemainingMin;
   final double? izySurplusSolaireW;
   final double? izyPv1W, izyPv2W, izyPv3W, izyPv4W;
+  final double? izyTodayKwh, izyMonthKwh, izyLifetimeKwh;
   // AP Systems EasyPower — un ou plusieurs micro-onduleurs
   final List<ApSystemsInverter> apsystemsInverters;
   final bool apsystemsOk;
@@ -370,6 +371,7 @@ class SolarState {
     this.izyDischargeBattW, this.izyDischargePvW, this.izyDischargeRemainingMin,
     this.izySurplusSolaireW,
     this.izyPv1W, this.izyPv2W, this.izyPv3W, this.izyPv4W,
+    this.izyTodayKwh, this.izyMonthKwh, this.izyLifetimeKwh,
     this.apsystemsInverters = const [],
     this.apsystemsOk = false, this.apsystemsStatus = 'connexion…',
   });
@@ -385,6 +387,7 @@ class SolarState {
     double? izyDischargeBattW, double? izyDischargePvW, int? izyDischargeRemainingMin,
     double? izySurplusSolaireW,
     double? izyPv1W, double? izyPv2W, double? izyPv3W, double? izyPv4W,
+    double? izyTodayKwh, double? izyMonthKwh, double? izyLifetimeKwh,
     List<ApSystemsInverter>? apsystemsInverters,
     bool? apsystemsOk, String? apsystemsStatus,
   }) {
@@ -415,6 +418,9 @@ class SolarState {
       izyPv2W: izyPv2W ?? this.izyPv2W,
       izyPv3W: izyPv3W ?? this.izyPv3W,
       izyPv4W: izyPv4W ?? this.izyPv4W,
+      izyTodayKwh: izyTodayKwh ?? this.izyTodayKwh,
+      izyMonthKwh: izyMonthKwh ?? this.izyMonthKwh,
+      izyLifetimeKwh: izyLifetimeKwh ?? this.izyLifetimeKwh,
       apsystemsInverters: apsystemsInverters ?? this.apsystemsInverters,
       apsystemsOk: apsystemsOk ?? this.apsystemsOk,
       apsystemsStatus: apsystemsStatus ?? this.apsystemsStatus,
@@ -1277,6 +1283,16 @@ class _HomeScreenState extends State<HomeScreen> {
             final gridRaw = asDouble(data['grid_power']);
             final gridPower = (gridRaw == -1) ? null : gridRaw;
 
+            // Production jour/mois/total (déjà présente dans cette même réponse,
+            // pas besoin d'un appel supplémentaire) : "extraData.production.all"
+            // est le vrai cumul depuis le début, plus fiable que "data.yearSum"
+            // qui se limite à l'année en cours.
+            final stationData = (data['data'] as Map?)?.cast<String, dynamic>() ?? {};
+            final production  = (data['extraData']?['production'] as Map?)?.cast<String, dynamic>() ?? {};
+            final todayKwh    = asDouble(production['day'])   ?? asDouble(stationData['todaySum']);
+            final monthKwh    = asDouble(production['month']) ?? asDouble(stationData['monthSum']);
+            final lifetimeKwh = asDouble(production['all'])   ?? asDouble(stationData['yearSum']);
+
             // Détail batterie (PV1-4, charge externe/PV, décharge, temps, température)
             // Nécessite le SN batterie configuré ; toute erreur ici (réseau ou
             // parsing) est isolée pour ne jamais faire échouer le refresh de base.
@@ -1359,6 +1375,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 izyDischargeRemainingMin: dischargeRemain,
                 izySurplusSolaireW: surplus,
                 izyPv1W: pv1, izyPv2W: pv2, izyPv3W: pv3, izyPv4W: pv4,
+                izyTodayKwh: todayKwh, izyMonthKwh: monthKwh, izyLifetimeKwh: lifetimeKwh,
               );
             });
           } catch (e) {
@@ -2523,6 +2540,20 @@ class _HomeScreenState extends State<HomeScreen> {
               remainingLabel: 'Temps restant', remainingMin: s.izyDischargeRemainingMin,
             )),
           ]),
+          // Production Jour / Mois / Total (depuis le début)
+          if (s.izyTodayKwh != null || s.izyMonthKwh != null || s.izyLifetimeKwh != null) ...[
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(child: _solarMiniStat('Jour',
+                  s.izyTodayKwh != null ? '${s.izyTodayKwh!.toStringAsFixed(2)} kWh' : null)),
+              const SizedBox(width: 8),
+              Expanded(child: _solarMiniStat('Mois',
+                  s.izyMonthKwh != null ? '${s.izyMonthKwh!.toStringAsFixed(2)} kWh' : null)),
+              const SizedBox(width: 8),
+              Expanded(child: _solarMiniStat('Total',
+                  s.izyLifetimeKwh != null ? '${s.izyLifetimeKwh!.toStringAsFixed(2)} kWh' : null)),
+            ]),
+          ],
           const SizedBox(height: 20),
         ],
 
