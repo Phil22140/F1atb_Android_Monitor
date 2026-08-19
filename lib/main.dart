@@ -2,10 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
+import 'package:basic_utils/basic_utils.dart' show CryptoUtils;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pointycastle/export.dart' show
+RSAPublicKey, PKCS1Encoding, RSAEngine, PublicKeyParameter,
+CBCBlockCipher, AESEngine, ParametersWithIV, KeyParameter;
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Client HTTP natif, plus permissif que le package http ─────────────────────
@@ -35,11 +40,29 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.0.31';
+const String appVersion = '4.6.3';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
 Color appLabelColor = const Color(0xFF5A6278);
+
+// Parsers tolérants : certaines API renvoient les nombres sous forme de String
+// (ex: "39" au lieu de 39). Un cast strict `as num?` planterait dans ce cas ;
+// ces helpers gèrent num ET String sans jamais lever d'exception.
+double? asDouble(dynamic v) {
+  if (v == null) return null;
+  if (v is num) return v.toDouble();
+  if (v is String) return double.tryParse(v);
+  return null;
+}
+
+int? asInt(dynamic v) {
+  if (v == null) return null;
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? double.tryParse(v)?.toInt();
+  return null;
+}
 
 // Presets couleur des labels secondaires (partagés avec ConfigSheet)
 const List<(Color, String)> kLabelColorPresets = [
@@ -218,6 +241,659 @@ class ChauffeEauApp extends StatelessWidget {
   }
 }
 
+// ── Suivi solaire (Izypower / Sunology) ────────────────────────────────────────
+
+class SolarConfig {
+  final bool enabled;
+  final bool sunologyEnabled;
+  final String sunologyEmail;
+  final String sunologyPassword;
+  final bool izypowerEnabled;
+  final String izypowerEmail;
+  final String izypowerPassword;
+  final String izypowerStationId;
+  final String izypowerBatterySn; // SN batterie, pour le détail PV1-4/charge/décharge
+  final bool apsystemsEnabled;
+  final String apsystemsUsername; // "Kontoname" de l'app, PAS l'email
+  final String apsystemsPassword;
+  final double totalCapacityW; // puissance crête installée totale (W), pour calibrer la jauge
+  const SolarConfig({
+    this.enabled = false,
+    this.sunologyEnabled = false,
+    this.sunologyEmail = '',
+    this.sunologyPassword = '',
+    this.izypowerEnabled = false,
+    this.izypowerEmail = '',
+    this.izypowerPassword = '',
+    this.izypowerStationId = '',
+    this.izypowerBatterySn = '',
+    this.apsystemsEnabled = false,
+    this.apsystemsUsername = '',
+    this.apsystemsPassword = '',
+    this.totalCapacityW = 0,
+  });
+
+  SolarConfig copyWith({
+    bool? enabled, bool? sunologyEnabled, String? sunologyEmail, String? sunologyPassword,
+    bool? izypowerEnabled, String? izypowerEmail, String? izypowerPassword, String? izypowerStationId,
+    String? izypowerBatterySn, bool? apsystemsEnabled, String? apsystemsUsername,
+    String? apsystemsPassword, double? totalCapacityW,
+  }) {
+    return SolarConfig(
+      enabled: enabled ?? this.enabled,
+      sunologyEnabled: sunologyEnabled ?? this.sunologyEnabled,
+      sunologyEmail: sunologyEmail ?? this.sunologyEmail,
+      sunologyPassword: sunologyPassword ?? this.sunologyPassword,
+      izypowerEnabled: izypowerEnabled ?? this.izypowerEnabled,
+      izypowerEmail: izypowerEmail ?? this.izypowerEmail,
+      izypowerPassword: izypowerPassword ?? this.izypowerPassword,
+      izypowerStationId: izypowerStationId ?? this.izypowerStationId,
+      izypowerBatterySn: izypowerBatterySn ?? this.izypowerBatterySn,
+      apsystemsEnabled: apsystemsEnabled ?? this.apsystemsEnabled,
+      apsystemsUsername: apsystemsUsername ?? this.apsystemsUsername,
+      apsystemsPassword: apsystemsPassword ?? this.apsystemsPassword,
+      totalCapacityW: totalCapacityW ?? this.totalCapacityW,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'enabled': enabled,
+    'sunology_enabled': sunologyEnabled,
+    'sunology_email': sunologyEmail,
+    'sunology_password': sunologyPassword,
+    'izypower_enabled': izypowerEnabled,
+    'izypower_email': izypowerEmail,
+    'izypower_password': izypowerPassword,
+    'izypower_station_id': izypowerStationId,
+    'izypower_battery_sn': izypowerBatterySn,
+    'apsystems_enabled': apsystemsEnabled,
+    'apsystems_username': apsystemsUsername,
+    'apsystems_password': apsystemsPassword,
+    'total_capacity_w': totalCapacityW,
+  };
+
+  factory SolarConfig.fromJson(Map<String, dynamic> j) => SolarConfig(
+    enabled: j['enabled'] as bool? ?? false,
+    sunologyEnabled: j['sunology_enabled'] as bool? ?? false,
+    sunologyEmail: j['sunology_email'] as String? ?? '',
+    sunologyPassword: j['sunology_password'] as String? ?? '',
+    izypowerEnabled: j['izypower_enabled'] as bool? ?? false,
+    izypowerEmail: j['izypower_email'] as String? ?? '',
+    izypowerPassword: j['izypower_password'] as String? ?? '',
+    izypowerBatterySn: j['izypower_battery_sn'] as String? ?? '',
+    izypowerStationId: j['izypower_station_id'] as String? ?? '',
+    apsystemsEnabled: j['apsystems_enabled'] as bool? ?? false,
+    apsystemsUsername: j['apsystems_username'] as String? ?? '',
+    apsystemsPassword: j['apsystems_password'] as String? ?? '',
+    totalCapacityW: (j['total_capacity_w'] as num?)?.toDouble() ?? 0,
+  );
+}
+
+class SolarState {
+  // Sunology
+  final double? sunologyPvW;
+  // Texte déjà formaté par l'API elle-même (ex: "9.4 kWh", "24 Wh")
+  final String? sunologyDayTxt, sunologyWeekTxt, sunologyMonthTxt, sunologyYearTxt;
+  final bool sunologyOk;
+  final String sunologyStatus;
+  // Izypower — station info (endpoint principal)
+  final double? izySocPct, izyBatteryPowerW, izyPvW, izyGridW;
+  final bool izyOk;
+  final String izyStatus;
+  // Izypower — détail batterie (endpoint /izy/v2/battery/{sn}, optionnel)
+  final String? izyBatteryState;   // Statique / En charge / En décharge
+  final double? izyBatteryTempC;
+  final double? izyChargeExterneW, izyChargePvW;
+  final int? izyChargeRemainingMin;
+  final double? izyDischargeBattW, izyDischargePvW;
+  final int? izyDischargeRemainingMin;
+  final double? izySurplusSolaireW;
+  final double? izyPv1W, izyPv2W, izyPv3W, izyPv4W;
+  // AP Systems EasyPower — un ou plusieurs micro-onduleurs
+  final List<ApSystemsInverter> apsystemsInverters;
+  final bool apsystemsOk;
+  final String apsystemsStatus;
+
+  const SolarState({
+    this.sunologyPvW, this.sunologyDayTxt, this.sunologyWeekTxt,
+    this.sunologyMonthTxt, this.sunologyYearTxt,
+    this.sunologyOk = false, this.sunologyStatus = 'connexion…',
+    this.izySocPct, this.izyBatteryPowerW, this.izyPvW, this.izyGridW,
+    this.izyOk = false, this.izyStatus = 'connexion…',
+    this.izyBatteryState, this.izyBatteryTempC,
+    this.izyChargeExterneW, this.izyChargePvW, this.izyChargeRemainingMin,
+    this.izyDischargeBattW, this.izyDischargePvW, this.izyDischargeRemainingMin,
+    this.izySurplusSolaireW,
+    this.izyPv1W, this.izyPv2W, this.izyPv3W, this.izyPv4W,
+    this.apsystemsInverters = const [],
+    this.apsystemsOk = false, this.apsystemsStatus = 'connexion…',
+  });
+
+  SolarState copyWith({
+    double? sunologyPvW, String? sunologyDayTxt, String? sunologyWeekTxt,
+    String? sunologyMonthTxt, String? sunologyYearTxt,
+    bool? sunologyOk, String? sunologyStatus,
+    double? izySocPct, double? izyBatteryPowerW, double? izyPvW, double? izyGridW,
+    bool? izyOk, String? izyStatus,
+    String? izyBatteryState, double? izyBatteryTempC,
+    double? izyChargeExterneW, double? izyChargePvW, int? izyChargeRemainingMin,
+    double? izyDischargeBattW, double? izyDischargePvW, int? izyDischargeRemainingMin,
+    double? izySurplusSolaireW,
+    double? izyPv1W, double? izyPv2W, double? izyPv3W, double? izyPv4W,
+    List<ApSystemsInverter>? apsystemsInverters,
+    bool? apsystemsOk, String? apsystemsStatus,
+  }) {
+    return SolarState(
+      sunologyPvW: sunologyPvW ?? this.sunologyPvW,
+      sunologyDayTxt: sunologyDayTxt ?? this.sunologyDayTxt,
+      sunologyWeekTxt: sunologyWeekTxt ?? this.sunologyWeekTxt,
+      sunologyMonthTxt: sunologyMonthTxt ?? this.sunologyMonthTxt,
+      sunologyYearTxt: sunologyYearTxt ?? this.sunologyYearTxt,
+      sunologyOk: sunologyOk ?? this.sunologyOk,
+      sunologyStatus: sunologyStatus ?? this.sunologyStatus,
+      izySocPct: izySocPct ?? this.izySocPct,
+      izyBatteryPowerW: izyBatteryPowerW ?? this.izyBatteryPowerW,
+      izyPvW: izyPvW ?? this.izyPvW,
+      izyGridW: izyGridW ?? this.izyGridW,
+      izyOk: izyOk ?? this.izyOk,
+      izyStatus: izyStatus ?? this.izyStatus,
+      izyBatteryState: izyBatteryState ?? this.izyBatteryState,
+      izyBatteryTempC: izyBatteryTempC ?? this.izyBatteryTempC,
+      izyChargeExterneW: izyChargeExterneW ?? this.izyChargeExterneW,
+      izyChargePvW: izyChargePvW ?? this.izyChargePvW,
+      izyChargeRemainingMin: izyChargeRemainingMin ?? this.izyChargeRemainingMin,
+      izyDischargeBattW: izyDischargeBattW ?? this.izyDischargeBattW,
+      izyDischargePvW: izyDischargePvW ?? this.izyDischargePvW,
+      izyDischargeRemainingMin: izyDischargeRemainingMin ?? this.izyDischargeRemainingMin,
+      izySurplusSolaireW: izySurplusSolaireW ?? this.izySurplusSolaireW,
+      izyPv1W: izyPv1W ?? this.izyPv1W,
+      izyPv2W: izyPv2W ?? this.izyPv2W,
+      izyPv3W: izyPv3W ?? this.izyPv3W,
+      izyPv4W: izyPv4W ?? this.izyPv4W,
+      apsystemsInverters: apsystemsInverters ?? this.apsystemsInverters,
+      apsystemsOk: apsystemsOk ?? this.apsystemsOk,
+      apsystemsStatus: apsystemsStatus ?? this.apsystemsStatus,
+    );
+  }
+}
+
+// ── Client API Izypower (JWT, header x-tts-access-token) ──────────────────────
+class IzypowerClient {
+  static const String baseUrl = 'http://application.izypowercloud.fr/photo_voltaic/api';
+  final String username, password;
+  String? _token;
+  IzypowerClient({required this.username, required this.password});
+
+  Future<String> login() async {
+    final client = HttpClient();
+    try {
+      final req = await client.postUrl(Uri.parse('$baseUrl/login'));
+      req.headers.set('Content-Type', 'application/json');
+      req.headers.set('app-platform', 'izy');
+      req.headers.set('Accept-Language', 'fr');
+      req.add(utf8.encode(jsonEncode({'username': username, 'password': password})));
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        throw Exception('Login Izypower échoué (${resp.statusCode})');
+      }
+      final data = jsonDecode(body);
+      _token = data['data']['token'] as String;
+      return _token!;
+    } finally {
+      client.close();
+    }
+  }
+
+  // Découverte automatique des stations du compte connecté (nom + ID),
+  // pour éviter la saisie manuelle du Station ID.
+  Future<List<({int id, String name})>> fetchStationsList({bool retry = true}) async {
+    if (_token == null) await login();
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(
+          Uri.parse('$baseUrl/powerStations/page?page=1&limit=100'));
+      req.headers.set('app-platform', 'izy');
+      req.headers.set('Accept-Language', 'fr');
+      req.headers.set('x-tts-access-token', _token!);
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      if ((resp.statusCode == 401 || resp.statusCode == 403) && retry) {
+        client.close();
+        await login();
+        return fetchStationsList(retry: false);
+      }
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        throw Exception('Izypower erreur ${resp.statusCode}');
+      }
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final records = (json['data']?['records'] as List?) ?? [];
+      return records.map((r) {
+        final id   = asInt(r['stationsId']) ?? 0;
+        final name = (r['stationName'] as String?)?.trim();
+        return (id: id, name: (name != null && name.isNotEmpty) ? name : 'Station $id');
+      }).where((s) => s.id != 0).toList();
+    } finally {
+      client.close();
+    }
+  }
+
+  // Découverte automatique du/des SN batterie(s) d'une station (parmi tous
+  // les appareils : compteur, batterie...), pour éviter la saisie manuelle.
+  Future<List<({String sn, String name})>> fetchBatteriesList(String stationId, {bool retry = true}) async {
+    if (_token == null) await login();
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(Uri.parse(
+          '$baseUrl/device/page?powerId=$stationId&deviceType=all&page=1&limit=100'));
+      req.headers.set('app-platform', 'izy');
+      req.headers.set('Accept-Language', 'fr');
+      req.headers.set('x-tts-access-token', _token!);
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      if ((resp.statusCode == 401 || resp.statusCode == 403) && retry) {
+        client.close();
+        await login();
+        return fetchBatteriesList(stationId, retry: false);
+      }
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        throw Exception('Izypower erreur ${resp.statusCode}');
+      }
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final records = (json['data']?['records'] as List?) ?? [];
+      return records
+          .where((r) => (r['deviceType'] as String?)?.toLowerCase() == 'battery')
+          .map((r) {
+        final sn   = (r['sn'] as String?) ?? (r['deviceName'] as String?) ?? '';
+        final name = (r['device'] as String?) ?? 'Batterie';
+        return (sn: sn, name: sn.isNotEmpty ? '$name · $sn' : name);
+      })
+          .where((b) => b.sn.isNotEmpty)
+          .toList();
+    } finally {
+      client.close();
+    }
+  }
+
+  // Active le mode "temps réel" côté serveur (fenêtre ~2mn, comme le toggle
+  // "Live mode" de l'app officielle) — à rappeler périodiquement pour rester
+  // en direct tant que la page Suivi Solaire est affichée.
+  Future<void> enableFastData(String stationId, {bool retry = true}) async {
+    if (_token == null) await login();
+    final client = HttpClient();
+    try {
+      final req = await client.postUrl(
+          Uri.parse('$baseUrl/v3/powerStations/fastData/$stationId'));
+      req.headers.set('app-platform', 'izy');
+      req.headers.set('Accept-Language', 'fr');
+      req.headers.set('x-tts-access-token', _token!);
+      req.headers.set('Content-Type', 'application/json');
+      req.contentLength = 0;
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      if ((resp.statusCode == 401 || resp.statusCode == 403) && retry) {
+        client.close();
+        await login();
+        return enableFastData(stationId, retry: false);
+      }
+      await resp.drain(); // corps de réponse ignoré, seul l'effet de bord compte
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<Map<String, dynamic>> fetchStationInfo(String stationId, {bool retry = true}) async {
+    if (_token == null) await login();
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(Uri.parse('$baseUrl/v3/powerStations/info/$stationId'));
+      req.headers.set('app-platform', 'izy');
+      req.headers.set('Accept-Language', 'fr');
+      req.headers.set('x-tts-access-token', _token!);
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      if ((resp.statusCode == 401 || resp.statusCode == 403) && retry) {
+        client.close();
+        await login();
+        return fetchStationInfo(stationId, retry: false);
+      }
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        throw Exception('Izypower erreur ${resp.statusCode}');
+      }
+      return jsonDecode(body) as Map<String, dynamic>;
+    } finally {
+      client.close();
+    }
+  }
+
+  // Détail batterie : PV1-4, charge externe/PV séparées, décharge, temps
+  // restants, température. Nécessite le numéro de série (SN) de la batterie.
+  static const String batteryBaseUrl = 'http://application.izypowercloud.fr/photo_voltaic/izy/v2/battery';
+
+  Future<Map<String, dynamic>> fetchBatteryDetail(String sn, {bool retry = true}) async {
+    if (_token == null) await login();
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(Uri.parse('$batteryBaseUrl/$sn'));
+      req.headers.set('app-platform', 'izy');
+      req.headers.set('Accept-Language', 'fr');
+      req.headers.set('x-tts-access-token', _token!);
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      if ((resp.statusCode == 401 || resp.statusCode == 403) && retry) {
+        client.close();
+        await login();
+        return fetchBatteryDetail(sn, retry: false);
+      }
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        throw Exception('Izypower batterie erreur ${resp.statusCode}');
+      }
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      return (json['data'] as Map<String, dynamic>?) ?? {};
+    } finally {
+      client.close();
+    }
+  }
+}
+
+// Libellé état batterie (onlineState de /izy/v2/battery/{sn})
+const Map<int, String> kIzyBatteryStateLabels = {
+  1000: 'Statique', 1001: 'En charge', 1002: 'En décharge',
+};
+
+// ── Client API Sunology (cookie de session géré manuellement) ─────────────────
+class SunologyClient {
+  static const String baseUrl = 'https://backend-mobile.stream.sunology.eu/api';
+  final String email, password;
+  final Map<String, String> _cookies = {};
+  SunologyClient({required this.email, required this.password});
+
+  String get _cookieHeader =>
+      _cookies.entries.map((e) => '${e.key}=${e.value}').join('; ');
+
+  Future<dynamic> _call(String path, {String method = 'GET', Map<String, dynamic>? body}) async {
+    final client = HttpClient();
+    client.badCertificateCallback = (cert, host, port) => true;
+    try {
+      final uri = Uri.parse('$baseUrl$path');
+      final req = method == 'POST' ? await client.postUrl(uri) : await client.getUrl(uri);
+      req.headers.set('Content-Type', 'application/json');
+      req.headers.set('App-Version', '1.0.0');
+      if (_cookies.isNotEmpty) req.headers.set('Cookie', _cookieHeader);
+      if (body != null) {
+        final bytes = utf8.encode(jsonEncode(body));
+        req.contentLength = bytes.length; // évite le chunked transfer-encoding
+        req.add(bytes);
+      } else if (method == 'POST') {
+        req.contentLength = 0;
+      }
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+
+      // Capturer les cookies de session renvoyés (login)
+      // IMPORTANT : les valeurs de session contiennent souvent des '=' (padding base64),
+      // donc on coupe uniquement sur le PREMIER '=' et non via split('=').
+      final setCookies = resp.headers[HttpHeaders.setCookieHeader];
+      if (setCookies != null) {
+        for (final c in setCookies) {
+          final pair = c.split(';').first;
+          final eqIdx = pair.indexOf('=');
+          if (eqIdx > 0) {
+            _cookies[pair.substring(0, eqIdx).trim()] = pair.substring(eqIdx + 1).trim();
+          }
+        }
+      }
+
+      final respBody = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200 && resp.statusCode != 204) {
+        final snippet = respBody.length > 200 ? respBody.substring(0, 200) : respBody;
+        throw Exception('Sunology ${resp.statusCode} sur $path : $snippet');
+      }
+      return respBody.isEmpty ? null : jsonDecode(respBody);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> login() async {
+    await _call('/login-post', method: 'POST',
+        body: {'username': email.toLowerCase(), 'password': password});
+  }
+
+  Future<List<dynamic>> getPanels() async =>
+      (await _call('/solar-panels')) as List<dynamic>;
+
+  Future<Map<String, dynamic>> getOverview(List<String> panelIds) async =>
+      (await _call('/overview', method: 'POST', body: {'solarPanels': panelIds}))
+      as Map<String, dynamic>;
+
+  // Renvoie le texte déjà formaté par l'API elle-même (ex: "9.4 kWh"), qui
+  // choisit dynamiquement l'unité (Wh/kWh) selon l'ampleur — on lui fait
+  // confiance plutôt que de recalculer notre propre conversion.
+  Future<String?> getHistoryDisplay(String scale, DateTime refDate) async {
+    final d = '${refDate.year.toString().padLeft(4, '0')}-'
+        '${refDate.month.toString().padLeft(2, '0')}-'
+        '${refDate.day.toString().padLeft(2, '0')}';
+    final resp = await _call('/history/$scale/$d?zone=2');
+    final obj = resp?['productionHistory']?['total']?['wattValueSuffix'];
+    if (obj == null) return null;
+    final displayed = obj['displayed'];
+    final suffix = obj['suffix'] ?? obj['unit'] ?? '';
+    if (displayed == null) return null;
+    return '$displayed $suffix'.trim();
+  }
+}
+
+// ── Client API AP Systems EasyPower (EZ1) ──────────────────────────────────────
+// Auth par identifiants chiffrés (RSA PKCS1v15 pour clé AES+IV, puis AES-256-CBC
+// avec padding zéro custom pour username/password) — reproduit fidèlement
+// l'algorithme de l'app Android officielle.
+
+const String _kApSystemsRsaPublicKeyB64 =
+    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAgdwBhVodMQ84lYZhDSGO'
+    'UDQAks+NMa7WQ83mR1OyHiIWtZ1wWAh4H7fclkdNS3lWCmDH9ldF7Kf6JlEvZTc0'
+    'Textv+YMLXO2gdDIoBvg7vlhY4HxOjXUIFQ+s7cWRrmEIgVVnTBLZU1GMC8zld7W'
+    'H9v9EYCAqK7rvGJP0STZ/g6BP8RGJKhdpY6b+ndMXRUBYwkqy8m1SDJHm1FeHSLQ'
+    'WTaWbP5pz1yrGkkwvx+pib6wli+WE70/uPHp0zXZK5iUwmRQfOkTjDOGJyEE1dqk'
+    'fHDTqne5ED81M4fCIEFYhyvnr1rifVJKHCDRGYQpJ0CiffjjH1ZOGSIN4JPG1EEIj'
+    'QIDAQAB';
+
+RSAPublicKey _apSystemsPublicKey() {
+  final pem = '-----BEGIN PUBLIC KEY-----\n$_kApSystemsRsaPublicKeyB64\n-----END PUBLIC KEY-----';
+  return CryptoUtils.rsaPublicKeyFromPem(pem);
+}
+
+// RSA PKCS1v15 (padding de chiffrement, pas de signature) → sortie base64
+String _apRsaEncrypt(String plaintext, RSAPublicKey key) {
+  final engine = PKCS1Encoding(RSAEngine())
+    ..init(true, PublicKeyParameter<RSAPublicKey>(key));
+  final input = Uint8List.fromList(utf8.encode(plaintext));
+  final output = engine.process(input);
+  return base64.encode(output);
+}
+
+// AES-256-CBC avec padding ZÉRO custom (pas PKCS7) → sortie hex.
+// Clé = 32 caractères ASCII de "keyStr" pris tels quels (pas de hex-decode).
+// IV  = 16 premiers caractères ASCII de "ivStr" tels quels.
+// Si len(data) est déjà multiple de 16, on ajoute quand même un bloc complet
+// de 16 zéros (comportement du script Python de référence, à reproduire).
+String _apAesEncryptHex(String plaintext, String keyStr, String ivStr) {
+  final keyBytes = Uint8List.fromList(utf8.encode(keyStr));
+  final ivBytes  = Uint8List.fromList(utf8.encode(ivStr)).sublist(0, 16);
+
+  final dataBytes = Uint8List.fromList(utf8.encode(plaintext));
+  final padLen = 16 - (dataBytes.length % 16); // toujours 1..16
+  final padded = Uint8List(dataBytes.length + padLen); // zero-init par défaut
+  padded.setRange(0, dataBytes.length, dataBytes);
+
+  final cipher = CBCBlockCipher(AESEngine())
+    ..init(true, ParametersWithIV(KeyParameter(keyBytes), ivBytes));
+
+  final output = Uint8List(padded.length);
+  var offset = 0;
+  while (offset < padded.length) {
+    offset += cipher.processBlock(padded, offset, output, offset);
+  }
+  return output.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+class ApSystemsInverter {
+  final String devId;
+  final String name;
+  final double? powerW, power1W, power2W;
+  final double? todayEnergyKwh, monthEnergyKwh, lifetimeEnergyKwh;
+  final bool online; // false si code=1001 (hors ligne / nuit)
+  const ApSystemsInverter({
+    required this.devId, required this.name,
+    this.powerW, this.power1W, this.power2W,
+    this.todayEnergyKwh, this.monthEnergyKwh, this.lifetimeEnergyKwh,
+    this.online = true,
+  });
+}
+
+class ApSystemsClient {
+  static const String baseUrl = 'https://app.api.apsystemsema.com:9223';
+  static const String appId = '4029817264d4821d0164d4821dd80015';
+  static const String appSecret = 'EZAd2023';
+  // Codes indiquant un token expiré → relogin + retry une fois
+  static const List<int> _expiredCodes = [2006, 3000, 3001, 3002, 3003, 3004, 5000];
+
+  final String username; // "Kontoname" de l'app, PAS l'email
+  final String password;
+  String? _token;
+  String? _userId;
+
+  ApSystemsClient({required this.username, required this.password});
+
+  Future<void> login() async {
+    final rsaKey = _apSystemsPublicKey();
+    final rnd = Random.secure();
+
+    // Clé AES : 16 octets aléatoires → hex string de 32 caractères
+    final aesKeyBytes = List<int>.generate(16, (_) => rnd.nextInt(256));
+    final aesKeyHex = aesKeyBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+    // Version/IV : string décimale de 16 chiffres
+    final version = List.generate(16, (_) => rnd.nextInt(10)).join();
+
+    final keyEnc      = _apRsaEncrypt(aesKeyHex, rsaKey);
+    final versionEnc  = _apRsaEncrypt(version, rsaKey);
+    final usernameEnc = _apAesEncryptHex(username, aesKeyHex, version);
+    final passwordEnc = _apAesEncryptHex(password, aesKeyHex, version);
+
+    final client = HttpClient();
+    try {
+      final uri = Uri.parse('$baseUrl/api/token/generateToken/user/loginEncrypt');
+      final req = await client.postUrl(uri);
+      req.headers.set('Content-Type', 'application/x-www-form-urlencoded');
+      final form = {
+        'app_id': appId, 'app_secret': appSecret,
+        'key': keyEnc, 'version': versionEnc,
+        'username': usernameEnc, 'password': passwordEnc,
+      };
+      final encoded = form.entries
+          .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+          .join('&');
+      final bytes = utf8.encode(encoded);
+      req.contentLength = bytes.length;
+      req.add(bytes);
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final body = await resp.transform(utf8.decoder).join();
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      if (json['code'] != 0) {
+        throw Exception('Login EasyPower échoué: ${json['message'] ?? json['code']}');
+      }
+      _token  = json['data']['access_token'] as String;
+      _userId = json['data']['user_id']?.toString();
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<Map<String, dynamic>?> _apiGet(String path, {bool retry = true}) async {
+    if (_token == null) await login();
+    final client = HttpClient();
+    try {
+      final uri = Uri.parse('$baseUrl/aps-api-web/$path');
+      final req = await client.getUrl(uri);
+      req.headers.set('Authorization', 'Bearer $_token');
+      req.headers.set('Accept-Language', 'fr');
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final body = await resp.transform(utf8.decoder).join();
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final code = json['code'];
+      if (code == 1001) return null; // onduleur hors ligne / pas de prod (nuit)
+      if (_expiredCodes.contains(code) && retry) {
+        client.close();
+        _token = null;
+        await login();
+        return _apiGet(path, retry: false);
+      }
+      if (code != 0) {
+        throw Exception('Erreur EasyPower sur $path : code=$code ${json['message'] ?? ''}');
+      }
+      return (json['data'] as Map<String, dynamic>?) ?? {};
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<String?> _ensureUserId() async {
+    if (_userId == null) await login();
+    return _userId;
+  }
+
+  // Liste des system_id du compte (via api/v2/user/ezUser/{user_id})
+  Future<List<String>> fetchSystemIds() async {
+    final uid = await _ensureUserId();
+    if (uid == null) return [];
+    final info = await _apiGet('api/v2/user/ezUser/$uid');
+    if (info == null) return [];
+    List? systems;
+    for (final key in ['systemInfo', 'systemList', 'systems', 'list', 'ezSystemList']) {
+      if (info[key] is List) { systems = info[key] as List; break; }
+    }
+    if (systems == null) return [];
+    return systems
+        .map((s) => (s as Map<String, dynamic>)['system_id']?.toString()
+        ?? s['systemId']?.toString() ?? s['sysId']?.toString() ?? s['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toList();
+  }
+
+  // Détail complet (statistic + realTime + status) de tous les onduleurs
+  // trouvés sur tous les systèmes du compte.
+  Future<List<ApSystemsInverter>> fetchAllInverters() async {
+    final systemIds = await fetchSystemIds();
+    final result = <ApSystemsInverter>[];
+    for (final sysId in systemIds) {
+      final invData = await _apiGet('api/v2/device/ezInverter/inverterList/$sysId');
+      final invList = (invData?['inverter'] as List?) ?? [];
+      for (final invRaw in invList) {
+        final inv = invRaw as Map<String, dynamic>;
+        final devId = inv['inverter_dev_id']?.toString() ?? inv['devId']?.toString()
+            ?? inv['deviceId']?.toString() ?? inv['id']?.toString() ?? '';
+        if (devId.isEmpty) continue;
+        final name = (inv['device_name'] as String?) ?? devId;
+
+        Map<String, dynamic>? statistic, realtime;
+        try { statistic = await _apiGet('api/v2/data/device/ezInverter/statistic/$devId'); } catch (_) {}
+        try { realtime  = await _apiGet('api/v2/data/device/ezInverter/realTime/$devId'); } catch (_) {}
+
+        final online = realtime != null; // null (code 1001) = hors ligne/nuit
+        result.add(ApSystemsInverter(
+          devId: devId, name: name, online: online,
+          powerW:  asDouble(realtime?['power'])  ?? asDouble(statistic?['lastPower']),
+          power1W: asDouble(realtime?['power1']) ?? asDouble(statistic?['lastPower1']),
+          power2W: asDouble(realtime?['power2']) ?? asDouble(statistic?['lastPower2']),
+          todayEnergyKwh:    asDouble(statistic?['todayEnergy']),
+          monthEnergyKwh:    asDouble(statistic?['monthEnergy']),
+          lifetimeEnergyKwh: asDouble(statistic?['lifetimeEnergy']),
+        ));
+      }
+    }
+    return result;
+  }
+}
+
 // ── Config et état par ESP32 ───────────────────────────────────────────────────
 class EspConfig {
   final String name;
@@ -329,11 +1005,21 @@ class _HomeScreenState extends State<HomeScreen> {
   String _orientationMode = 'auto';
   String _displayMode     = 'multi'; // 'multi' | 'single'
   bool   _multiSites      = false;
-  Color  _uiLabelColor    = const Color(0xFF5A6278); // couleur des textes secondaires   // false=site unique, true=multisites
+  Color  _uiLabelColor    = const Color(0xFF5A6278); // couleur des textes secondaires
   int _currentPage = 0;
   int? _singleSelectedId;  // encodé : espIdx * 1000 + numAction
   late PageController _pageController;
   Timer? _timer;
+
+  // ── Suivi solaire ────────────────────────────────────────────────────────────
+  SolarConfig _solarConfig = const SolarConfig();
+  SolarState  _solarState  = const SolarState();
+  IzypowerClient?  _izyClient;
+  SunologyClient?  _sunoClient;
+  ApSystemsClient? _apClient;
+  bool _solarRefreshInProgress = false; // évite les cycles qui se chevauchent
+  Timer? _solarTimer;
+  Timer? _izyLiveModeTimer;
 
   @override
   void initState() {
@@ -345,6 +1031,8 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _timer?.cancel();
+    _solarTimer?.cancel();
+    _izyLiveModeTimer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
@@ -373,6 +1061,8 @@ class _HomeScreenState extends State<HomeScreen> {
         _multiSites   = (data['multi_sites'] as bool?) ?? false;
         final colorVal = data['text_color'] as int?;
         if (colorVal != null) { _uiLabelColor = Color(colorVal); appLabelColor = Color(colorVal); }
+        final solarJson = data['solar_config'] as Map<String, dynamic>?;
+        if (solarJson != null) _solarConfig = SolarConfig.fromJson(solarJson);
         final list    = (data['configs'] as List).cast<Map<String, dynamic>>();
         for (final c in list) {
           configs.add(EspConfig(
@@ -461,6 +1151,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _orientationMode = orientation;
       });
       _applyOrientation(orientation);
+      _initSolarClients();
       _startPolling();
     } else {
       _showConfig();
@@ -468,11 +1159,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveConfig(List<EspConfig> configs, String orientation,
-      String displayMode, bool multiSites, Color labelColor) async {
+      String displayMode, bool multiSites, Color labelColor, SolarConfig solarConfig) async {
     _displayMode    = displayMode;
     _multiSites     = multiSites;
     _uiLabelColor   = labelColor;
     appLabelColor   = labelColor;
+    final solarChanged = _solarConfig.enabled != solarConfig.enabled ||
+        _solarConfig.sunologyEnabled != solarConfig.sunologyEnabled ||
+        _solarConfig.izypowerEnabled != solarConfig.izypowerEnabled;
+    _solarConfig    = solarConfig;
     // ── Sauvegarde dans un fichier JSON (synchrone = garanti sur disque) ───
     try {
       final file    = await _configFile;
@@ -481,6 +1176,7 @@ class _HomeScreenState extends State<HomeScreen> {
         'display_mode': _displayMode,
         'multi_sites':  _multiSites,
         'text_color':   _uiLabelColor.value,
+        'solar_config': _solarConfig.toJson(),
         'configs': configs.map((c) {
           final map = <String, dynamic>{
             'name': c.name,
@@ -516,7 +1212,213 @@ class _HomeScreenState extends State<HomeScreen> {
       _orientationMode = orientation;
     });
     _applyOrientation(orientation);
+    _initSolarClients();
+    if (solarChanged) {
+      _currentPage = 0;
+      if (_pageController.hasClients) _pageController.jumpToPage(0);
+    }
     _startPolling();
+  }
+
+  void _initSolarClients() {
+    _izyClient = (_solarConfig.enabled && _solarConfig.izypowerEnabled &&
+        _solarConfig.izypowerEmail.isNotEmpty)
+        ? IzypowerClient(username: _solarConfig.izypowerEmail, password: _solarConfig.izypowerPassword)
+        : null;
+    _sunoClient = (_solarConfig.enabled && _solarConfig.sunologyEnabled &&
+        _solarConfig.sunologyEmail.isNotEmpty)
+        ? SunologyClient(email: _solarConfig.sunologyEmail, password: _solarConfig.sunologyPassword)
+        : null;
+    _apClient = (_solarConfig.enabled && _solarConfig.apsystemsEnabled &&
+        _solarConfig.apsystemsUsername.isNotEmpty)
+        ? ApSystemsClient(username: _solarConfig.apsystemsUsername, password: _solarConfig.apsystemsPassword)
+        : null;
+  }
+
+  bool get _solarTabEnabled => _solarConfig.enabled &&
+      (_solarConfig.izypowerEnabled || _solarConfig.sunologyEnabled || _solarConfig.apsystemsEnabled);
+
+  int get _totalPages =>
+      (_displayMode == 'single' ? 1 : _espConfigs.length) + (_solarTabEnabled ? 1 : 0);
+
+  bool _isSolarPage(int pageIdx) =>
+      _solarTabEnabled && pageIdx == _totalPages - 1;
+
+  Future<void> _refreshSolar() async {
+    if (!_solarTabEnabled) return;
+    if (_solarRefreshInProgress) return; // cycle précédent encore en cours, on saute ce tick
+    _solarRefreshInProgress = true;
+    try {
+      // Izypower
+      if (_izyClient != null) {
+        // Aucun fallback : sans Station ID renseigné, on ne peut pas savoir
+        // à quelle installation appartient l'utilisateur — interroger une
+        // valeur par défaut afficherait les données de quelqu'un d'autre.
+        if (_solarConfig.izypowerStationId.isEmpty) {
+          if (mounted) setState(() => _solarState = _solarState.copyWith(
+            izyOk: false, izyStatus: 'Station ID requis (config)',
+          ));
+        } else {
+          try {
+            final stationId = _solarConfig.izypowerStationId;
+            final data = await _izyClient!.fetchStationInfo(stationId);
+            final pvPower   = asDouble(data['battery_pv_power']) ?? 0;
+            final battPower = asDouble(data['battery_power']) ?? 0;
+            // battery_pv_power = charge directe depuis le solaire (le cas le plus
+            // fréquent) ; battery_power = échange batterie hors PV (vers/depuis
+            // réseau ou décharge), utilisé seulement quand aucune charge PV en cours.
+            final effectiveBattery = pvPower != 0 ? pvPower : battPower;
+            // grid_power=-1 est une valeur sentinelle "pas de donnée", pas un wattage réel
+            final gridRaw = asDouble(data['grid_power']);
+            final gridPower = (gridRaw == -1) ? null : gridRaw;
+
+            // Détail batterie (PV1-4, charge externe/PV, décharge, temps, température)
+            // Nécessite le SN batterie configuré ; toute erreur ici (réseau ou
+            // parsing) est isolée pour ne jamais faire échouer le refresh de base.
+            String? batteryState;
+            double? battTempC, chargeExt, chargePv, dischargeBatt, dischargePv, surplus;
+            double? pv1, pv2, pv3, pv4, pvTotalDetail;
+            int? chargeRemain, dischargeRemain;
+
+            if (_solarConfig.izypowerBatterySn.isNotEmpty) {
+              try {
+                final batt = await _izyClient!.fetchBatteryDetail(_solarConfig.izypowerBatterySn);
+
+                final onlineState = asInt(batt['onlineState']);
+                batteryState = kIzyBatteryStateLabels[onlineState];
+                battTempC = asDouble(batt['socTemp']);
+
+                final chargeRaw = batt['chargeData'];
+                final charge = chargeRaw is Map ? Map<String, dynamic>.from(chargeRaw) : <String, dynamic>{};
+                chargeExt = asDouble(charge['power1']);
+                chargePv  = asDouble(charge['power2']);
+                chargeRemain = asInt(charge['remainingTime']); // valeur "-" si inactif → null via asInt
+
+                final dischargeRaw = batt['dischargeData'];
+                final discharge = dischargeRaw is Map ? Map<String, dynamic>.from(dischargeRaw) : <String, dynamic>{};
+                dischargeBatt = asDouble(discharge['power1']);
+                dischargePv   = asDouble(discharge['power2']);
+                dischargeRemain = asInt(discharge['remainingTime']);
+
+                surplus = asDouble(batt['solarPower']);
+                // pvPower du détail batterie = somme vérifiée de PV1-4, plus précis
+                // que battery_pv_power de l'endpoint station de base.
+                pvTotalDetail = asDouble(batt['pvPower']);
+
+                final pvListRaw = batt['pvList'];
+                final pvList = pvListRaw is List ? pvListRaw : const [];
+                double? pvAt(int i) {
+                  if (i >= pvList.length) return null;
+                  final item = pvList[i];
+                  return item is Map ? asDouble(item['power']) : null;
+                }
+                pv1 = pvAt(0); pv2 = pvAt(1); pv3 = pvAt(2); pv4 = pvAt(3);
+              } catch (_) {
+                // Échec (réseau ou parsing) : on garde les données de base sans le détail
+              }
+            }
+
+            if (mounted) setState(() {
+              // Reconstruction complète (pas copyWith) pour la partie Izypower :
+              // le refresh renvoie un jeu de données complet à chaque fois, donc
+              // une valeur redevenue null (ex: remainingTime="-") doit bien
+              // effacer l'ancienne valeur affichée, pas la conserver.
+              _solarState = SolarState(
+                // Partie Sunology inchangée
+                sunologyPvW: _solarState.sunologyPvW,
+                sunologyDayTxt: _solarState.sunologyDayTxt,
+                sunologyWeekTxt: _solarState.sunologyWeekTxt,
+                sunologyMonthTxt: _solarState.sunologyMonthTxt,
+                sunologyYearTxt: _solarState.sunologyYearTxt,
+                sunologyOk: _solarState.sunologyOk,
+                sunologyStatus: _solarState.sunologyStatus,
+                // Partie EasyPower inchangée (oublié précédemment → provoquait un
+                // reset visible à "connexion…" à chaque cycle avant d'être remis
+                // à jour par sa propre section, quelques lignes plus loin)
+                apsystemsInverters: _solarState.apsystemsInverters,
+                apsystemsOk: _solarState.apsystemsOk,
+                apsystemsStatus: _solarState.apsystemsStatus,
+                // Partie Izypower : toujours les valeurs fraîches, y compris null
+                izySocPct: asDouble(data['battery_soc']),
+                izyBatteryPowerW: effectiveBattery,
+                izyPvW: pvTotalDetail ?? pvPower,
+                izyGridW: gridPower,
+                izyOk: true, izyStatus: TimeOfDay.now().format(context),
+                izyBatteryState: batteryState,
+                izyBatteryTempC: battTempC,
+                izyChargeExterneW: chargeExt,
+                izyChargePvW: chargePv,
+                izyChargeRemainingMin: chargeRemain,
+                izyDischargeBattW: dischargeBatt,
+                izyDischargePvW: dischargePv,
+                izyDischargeRemainingMin: dischargeRemain,
+                izySurplusSolaireW: surplus,
+                izyPv1W: pv1, izyPv2W: pv2, izyPv3W: pv3, izyPv4W: pv4,
+              );
+            });
+          } catch (e) {
+            if (mounted) setState(() => _solarState = _solarState.copyWith(izyOk: false, izyStatus: 'erreur'));
+          }
+        }
+      }
+      // Sunology
+      if (_sunoClient != null) {
+        try {
+          List<dynamic> panels;
+          try {
+            panels = await _sunoClient!.getPanels();
+          } catch (_) {
+            await _sunoClient!.login();
+            panels = await _sunoClient!.getPanels();
+          }
+          final ids = panels.map((p) => p['id'] as String).toList();
+          final overview = await _sunoClient!.getOverview(ids);
+          final pv = asDouble(overview['production']?['total']);
+
+          final today = DateTime.now();
+          final monday = today.subtract(Duration(days: today.weekday - 1));
+          final monthStart = DateTime(today.year, today.month, 1);
+          final yearStart  = DateTime(today.year, 1, 1);
+          final results = await Future.wait([
+            _sunoClient!.getHistoryDisplay('DAILY', today),
+            _sunoClient!.getHistoryDisplay('WEEKLY', monday),
+            _sunoClient!.getHistoryDisplay('MONTHLY', monthStart),
+            _sunoClient!.getHistoryDisplay('YEARLY', yearStart),
+          ]);
+
+          if (mounted) setState(() {
+            _solarState = _solarState.copyWith(
+              sunologyPvW: pv,
+              sunologyDayTxt: results[0], sunologyWeekTxt: results[1],
+              sunologyMonthTxt: results[2], sunologyYearTxt: results[3],
+              sunologyOk: true, sunologyStatus: TimeOfDay.now().format(context),
+            );
+          });
+        } catch (e) {
+          if (mounted) setState(() => _solarState = _solarState.copyWith(sunologyOk: false, sunologyStatus: 'erreur'));
+        }
+      }
+      // AP Systems EasyPower
+      if (_apClient != null) {
+        try {
+          final inverters = await _apClient!.fetchAllInverters();
+          if (mounted) setState(() {
+            _solarState = _solarState.copyWith(
+              apsystemsInverters: inverters,
+              apsystemsOk: true, apsystemsStatus: TimeOfDay.now().format(context),
+            );
+          });
+        } catch (e) {
+          // DEBUG temporaire : message d'erreur réel au lieu du générique
+          // 'erreur', pour diagnostiquer la déconnexion signalée.
+          final msg = e.toString().replaceFirst('Exception: ', '');
+          final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
+          if (mounted) setState(() => _solarState = _solarState.copyWith(apsystemsOk: false, apsystemsStatus: short));
+        }
+      }
+    } finally {
+      _solarRefreshInProgress = false;
+    }
   }
 
   void _applyOrientation(String mode) {
@@ -538,13 +1440,33 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startPolling() {
     _timer?.cancel();
+    _solarTimer?.cancel();
+    _izyLiveModeTimer?.cancel();
+
+    if (_isSolarPage(_currentPage)) {
+      // Page solaire affichée : seule elle est pollée
+      _refreshSolar();
+      _solarTimer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshSolar());
+
+      // Active le "mode temps réel" Izypower tant que la page reste affichée.
+      // Fenêtre serveur ~2mn (comme le toggle "Live mode" de l'app officielle) :
+      // on relance avant expiration, avec une marge de sécurité (90s < 120s).
+      if (_izyClient != null && _solarConfig.izypowerStationId.isNotEmpty) {
+        final sid = _solarConfig.izypowerStationId;
+        _izyClient!.enableFastData(sid).catchError((_) {});
+        _izyLiveModeTimer = Timer.periodic(const Duration(seconds: 90),
+                (_) => _izyClient?.enableFastData(sid).catchError((_) {}));
+      }
+      return;
+    }
+
     if (_displayMode == 'single') {
-      // Mode page unique : poll tous les ESPs
+      // Page ESP combinée : poll tous les ESPs
       for (var i = 0; i < _espConfigs.length; i++) _fetchCapteursInfo(i);
       _refreshAll();
       _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshAll());
     } else {
-      // Mode multi-pages : poll seulement la page visible
+      // Mode multi-pages : poll seulement l'ESP visible
       _fetchCapteursInfo(_currentPage);
       _refreshEsp(_currentPage);
       _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshEsp(_currentPage));
@@ -739,8 +1661,9 @@ class _HomeScreenState extends State<HomeScreen> {
         currentDisplayMode: _displayMode,
         currentMultiSites:  _multiSites,
         currentLabelColor:  _uiLabelColor,
-        onSave: (configs, orientation, displayMode, multiSites, labelColor) async {
-          await _saveConfig(configs, orientation, displayMode, multiSites, labelColor);
+        currentSolarConfig: _solarConfig,
+        onSave: (configs, orientation, displayMode, multiSites, labelColor, solarConfig) async {
+          await _saveConfig(configs, orientation, displayMode, multiSites, labelColor, solarConfig);
           if (mounted) Navigator.pop(context);
         },
       ),
@@ -956,17 +1879,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Colonne boutons droite : ⚙ au-dessus, icône chart en-dessous
+  // Colonne boutons droite : ⚙ au-dessus, icône chart en-dessous (optionnelle)
   Widget _actionButtons(BuildContext context,
-      {double top = 18, double right = 36}) {
+      {double top = 18, double right = 36, bool showChartButton = true}) {
     return Align(
       alignment: Alignment.topRight,
       child: Padding(
         padding: EdgeInsets.fromLTRB(0, top, right, 0),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           _configButton(),
-          const SizedBox(height: 6),
-          _chartButton(context),
+          if (showChartButton) ...[
+            const SizedBox(height: 6),
+            _chartButton(context),
+          ],
         ]),
       ),
     );
@@ -1033,25 +1958,23 @@ class _HomeScreenState extends State<HomeScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // Mode page unique
-    if (_displayMode == 'single') {
-      return Scaffold(body: _buildSinglePageView());
-    }
-
-    // Mode multi-pages
-    final multiEsp = _espConfigs.length > 1;
+    final showDots = _totalPages > 1;
     return Scaffold(
       body: Stack(children: [
         PageView.builder(
           controller: _pageController,
           onPageChanged: (i) {
             setState(() => _currentPage = i);
-            _startPolling(); // bascule le polling sur le nouvel ESP
+            _startPolling(); // bascule le polling sur la nouvelle page (ESP ou solaire)
           },
-          itemCount: _espConfigs.length,
-          itemBuilder: (ctx, idx) => _buildEspPage(ctx, idx),
+          itemCount: _totalPages,
+          itemBuilder: (ctx, idx) {
+            if (_isSolarPage(idx)) return _buildSolarPage(ctx);
+            if (_displayMode == 'single') return _buildSinglePageView();
+            return _buildEspPage(ctx, idx);
+          },
         ),
-        if (multiEsp)
+        if (showDots)
           Positioned(
             bottom: 0, left: 0, right: 0,
             child: SafeArea(
@@ -1411,11 +2334,437 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  // ── Page suivi solaire (Izypower / Sunology) ────────────────────────────────
+  Widget _buildSolarPage(BuildContext context) {
+    final s = _solarState;
+    final apTotalPv = s.apsystemsInverters
+        .fold<double>(0, (sum, inv) => sum + (inv.powerW ?? 0));
+    final totalPv = (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv;
+    final hasIzy  = _solarConfig.izypowerEnabled;
+    final hasSuno = _solarConfig.sunologyEnabled;
+    final hasAp   = _solarConfig.apsystemsEnabled;
+
+    Widget content = SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+      child: Column(children: [
+        // ── En-tête : Production totale + jauge ──────────────────────────────
+        Text('PRODUCTION PV TOTALE',
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                letterSpacing: 2, color: appLabelColor)),
+        const SizedBox(height: 10),
+        PowerGaugeWidget(value: totalPv, hasValue: (s.izyOk || s.sunologyOk),
+            maxValue: _solarConfig.totalCapacityW),
+        const SizedBox(height: 20),
+
+        // ── Section Izypower ──────────────────────────────────────────────────
+        if (hasIzy) ...[
+          _solarSectionHeader('IZYPOWER', const Color(0xFFF97316), s.izyOk, s.izyStatus),
+          const SizedBox(height: 10),
+
+          // ── Prod. PV (total) + détail PV1-4 compact à côté ────────────────
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFF111827),
+              border: Border.all(color: Colors.white.withOpacity(0.08)),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+              Icon(Icons.solar_power_outlined, color: const Color(0xFFFACC15), size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('PROD. PV', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                      letterSpacing: 1.2, color: appLabelColor)),
+                  const SizedBox(height: 2),
+                  Text(s.izyPvW != null ? '${s.izyPvW!.round()} W' : '--',
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 22,
+                          fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+                ]),
+              ),
+              // PV1-4 compact, si disponibles (SN batterie configuré)
+              if ([s.izyPv1W, s.izyPv2W, s.izyPv3W, s.izyPv4W].any((v) => v != null))
+                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    _pvMiniLabel('PV1', s.izyPv1W),
+                    const SizedBox(width: 10),
+                    _pvMiniLabel('PV2', s.izyPv2W),
+                  ]),
+                  const SizedBox(height: 4),
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    _pvMiniLabel('PV3', s.izyPv3W),
+                    const SizedBox(width: 10),
+                    _pvMiniLabel('PV4', s.izyPv4W),
+                  ]),
+                ]),
+            ]),
+          ),
+          const SizedBox(height: 10),
+
+          // ── Batterie : icône visuelle + SOC/température + état ────────────
+          // Surplus solaire placé à côté (compact, ne prend pas beaucoup de place)
+          // IntrinsicHeight fournit une hauteur bornée au Row, ce qui permet
+          // d'utiliser stretch sans risque (contrairement à un stretch nu dans
+          // un contexte de hauteur non bornée, qui peut casser le rendu).
+          IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(
+                flex: 3,
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF111827),
+                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                    BatteryVisual(socPct: s.izySocPct),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('BATTERIE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                            letterSpacing: 1.4, color: appLabelColor)),
+                        const SizedBox(height: 4),
+                        Row(children: [
+                          Text(s.izySocPct != null ? '${s.izySocPct!.round()}%' : '--',
+                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600,
+                                  color: Color(0xFFE8EAF0))),
+                          if (s.izyBatteryTempC != null) ...[
+                            const SizedBox(width: 10),
+                            Icon(Icons.thermostat_outlined, size: 15, color: appLabelColor),
+                            const SizedBox(width: 2),
+                            Text('${s.izyBatteryTempC!.toStringAsFixed(0)}°C',
+                                style: TextStyle(fontSize: 14, color: appLabelColor)),
+                          ],
+                        ]),
+                        const SizedBox(height: 4),
+                        // État réel si détail dispo, sinon estimation via le signe de izyBatteryPowerW
+                        if (s.izyBatteryState != null)
+                          Row(children: [
+                            Container(width: 7, height: 7, decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: s.izyBatteryState == 'En charge' ? const Color(0xFF22D3A8)
+                                    : s.izyBatteryState == 'En décharge' ? const Color(0xFFF43F5E)
+                                    : appLabelColor)),
+                            const SizedBox(width: 6),
+                            Text(s.izyBatteryState!,
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                    color: s.izyBatteryState == 'En charge' ? const Color(0xFF22D3A8)
+                                        : s.izyBatteryState == 'En décharge' ? const Color(0xFFF43F5E)
+                                        : appLabelColor)),
+                          ])
+                        else if (s.izyBatteryPowerW != null)
+                          Row(children: [
+                            Icon(
+                              s.izyBatteryPowerW! >= 0 ? Icons.arrow_downward : Icons.arrow_upward,
+                              size: 14,
+                              color: s.izyBatteryPowerW! >= 0
+                                  ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${s.izyBatteryPowerW! >= 0 ? "Charge" : "Décharge"} · '
+                                  '${s.izyBatteryPowerW!.abs().round()} W',
+                              style: TextStyle(fontSize: 12, color: appLabelColor),
+                            ),
+                          ]),
+                      ]),
+                    ),
+                  ]),
+                ),
+              ),
+              if (s.izySurplusSolaireW != null) ...[
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: _solarValueCard('Surplus solaire', s.izySurplusSolaireW,
+                      const Color(0xFF22D3A8), Icons.bolt_outlined),
+                ),
+              ],
+            ]),
+          ),
+          const SizedBox(height: 10),
+
+          // ── Charge en W (source externe / PV / temps restant) ─────────────
+          // ── Décharge en W (batterie / PV / temps restant) ─────────────────
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: _chargeDetailCard(
+              title: 'CHARGE', icon: Icons.arrow_downward, color: const Color(0xFFF97316),
+              line1Label: 'Source externe', line1: s.izyChargeExterneW,
+              line2Label: 'PV', line2: s.izyChargePvW,
+              remainingLabel: 'Temps restant', remainingMin: s.izyChargeRemainingMin,
+            )),
+            const SizedBox(width: 10),
+            Expanded(child: _chargeDetailCard(
+              title: 'DÉCHARGE', icon: Icons.arrow_upward, color: const Color(0xFF3B82F6),
+              line1Label: 'Batterie', line1: s.izyDischargeBattW,
+              line2Label: 'PV', line2: s.izyDischargePvW,
+              remainingLabel: 'Temps restant', remainingMin: s.izyDischargeRemainingMin,
+            )),
+          ]),
+          const SizedBox(height: 20),
+        ],
+
+        // ── Section Sunology ──────────────────────────────────────────────────
+        if (hasSuno) ...[
+          _solarSectionHeader('SUNOLOGY', const Color(0xFF3B82F6), s.sunologyOk, s.sunologyStatus),
+          const SizedBox(height: 10),
+          _solarValueCard('Prod. PV', s.sunologyPvW,
+              const Color(0xFFFACC15), Icons.solar_power_outlined),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(child: _solarMiniStat('Jour', s.sunologyDayTxt)),
+            const SizedBox(width: 8),
+            Expanded(child: _solarMiniStat('Semaine', s.sunologyWeekTxt)),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(child: _solarMiniStat('Mois', s.sunologyMonthTxt)),
+            const SizedBox(width: 8),
+            Expanded(child: _solarMiniStat('Année', s.sunologyYearTxt)),
+          ]),
+          const SizedBox(height: 20),
+        ],
+
+        // ── Section AP Systems EasyPower (un bloc par micro-onduleur) ─────────
+        if (hasAp) ...[
+          _solarSectionHeader('EASYPOWER', const Color(0xFF22C55E), s.apsystemsOk, s.apsystemsStatus),
+          const SizedBox(height: 10),
+          if (s.apsystemsInverters.isEmpty)
+            Text('Aucun onduleur trouvé', style: TextStyle(fontSize: 12, color: appLabelColor))
+          else
+            for (var i = 0; i < s.apsystemsInverters.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              Builder(builder: (_) {
+                final inv = s.apsystemsInverters[i];
+                String? kwh(double? v) => v != null ? '${v.toStringAsFixed(2)} kWh' : null;
+                return Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D1420),
+                    border: Border.all(color: Colors.white.withOpacity(0.06)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Expanded(
+                        child: Text(inv.name.toUpperCase(),
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2, color: appLabelColor)),
+                      ),
+                      if (!inv.online)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.06),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text('hors ligne',
+                              style: TextStyle(fontSize: 9, color: appLabelColor)),
+                        ),
+                    ]),
+                    const SizedBox(height: 8),
+                    Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                      Icon(Icons.solar_power_outlined, color: const Color(0xFFFACC15), size: 20),
+                      const SizedBox(width: 8),
+                      Text(inv.powerW != null ? '${inv.powerW!.round()} W' : '--',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 20,
+                              fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+                      const Spacer(),
+                      _pvMiniLabel('PV1', inv.power1W),
+                      const SizedBox(width: 10),
+                      _pvMiniLabel('PV2', inv.power2W),
+                    ]),
+                    const SizedBox(height: 10),
+                    Row(children: [
+                      Expanded(child: _solarMiniStat('Jour', kwh(inv.todayEnergyKwh))),
+                      const SizedBox(width: 8),
+                      Expanded(child: _solarMiniStat('Mois', kwh(inv.monthEnergyKwh))),
+                      const SizedBox(width: 8),
+                      Expanded(child: _solarMiniStat('Total', kwh(inv.lifetimeEnergyKwh))),
+                    ]),
+                  ]),
+                );
+              }),
+            ],
+        ],
+      ]),
+    );
+
+    return Stack(children: [
+      Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
+            child: Row(children: [
+              Container(
+                width: 40, height: 40,
+                decoration: const BoxDecoration(
+                    color: Color(0xFFFACC15), shape: BoxShape.circle),
+                child: const Icon(Icons.wb_sunny_outlined, color: Colors.black87, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text('Suivi Solaire',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                        letterSpacing: 1.5, color: appLabelColor)),
+              ),
+            ]),
+          ),
+        ),
+        Expanded(child: SafeArea(top: false, child: content)),
+      ]),
+      SafeArea(
+        bottom: false,
+        child: _actionButtons(context, top: 18, right: 36, showChartButton: false),
+      ),
+    ]);
+  }
+
+  Widget _solarSectionHeader(String title, Color accent, bool ok, String status) {
+    return Row(children: [
+      Container(width: 8, height: 8,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: accent)),
+      const SizedBox(width: 6),
+      Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+          letterSpacing: 1.5, color: accent)),
+      const Spacer(),
+      Container(width: 6, height: 6,
+          decoration: BoxDecoration(shape: BoxShape.circle,
+              color: ok ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E))),
+      const SizedBox(width: 5),
+      Flexible(
+        child: Text(status, maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 10, color: appLabelColor, fontFamily: 'monospace')),
+      ),
+    ]);
+  }
+
+  // Petit label PVn compact, affiché à côté du total dans la carte prod. PV
+  Widget _pvMiniLabel(String label, double? w) {
+    return RichText(
+      text: TextSpan(children: [
+        TextSpan(text: '$label ', style: TextStyle(fontSize: 10, color: appLabelColor)),
+        TextSpan(text: w != null ? '${w.round()}W' : '--',
+            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                color: Color(0xFFE8EAF0), fontFamily: 'monospace')),
+      ]),
+    );
+  }
+
+  // Carte détail charge/décharge (source1/source2/temps restant), façon app Izypower
+  Widget _chargeDetailCard({
+    required String title, required IconData icon, required Color color,
+    required String line1Label, required double? line1,
+    required String line2Label, required double? line2,
+    required String remainingLabel, required int? remainingMin,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Text(title, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+              letterSpacing: 1.2, color: color)),
+        ]),
+        const SizedBox(height: 10),
+        Text(line1Label, style: TextStyle(fontSize: 10, color: appLabelColor)),
+        Text(line1 != null ? '${line1.round()} W' : '--',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 15,
+                fontWeight: FontWeight.w500, color: Color(0xFFE8EAF0))),
+        const SizedBox(height: 8),
+        Text(line2Label, style: TextStyle(fontSize: 10, color: appLabelColor)),
+        Text(line2 != null ? '${line2.round()} W' : '--',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 15,
+                fontWeight: FontWeight.w500, color: Color(0xFFE8EAF0))),
+        const SizedBox(height: 8),
+        Text(remainingLabel, style: TextStyle(fontSize: 10, color: appLabelColor)),
+        Text(remainingMin != null ? '$remainingMin min' : '-- min',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 15,
+                fontWeight: FontWeight.w500, color: Color(0xFFE8EAF0))),
+      ]),
+    );
+  }
+
+  Widget _solarValueCard(String label, double? value, Color color, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(children: [
+        Icon(icon, color: color, size: 22),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label.toUpperCase(), maxLines: 2, overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                    letterSpacing: 1.2, color: appLabelColor)),
+            const SizedBox(height: 2),
+            Text(value != null ? '${value.round()} W' : '--',
+                style: TextStyle(fontFamily: 'monospace', fontSize: 22,
+                    fontWeight: FontWeight.w500, color: color)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  // wh = valeur en Wh (l'API Sunology renvoie du Wh malgré le nom "wattValueSuffix")
+  // txt = valeur déjà formatée par l'API Sunology elle-même (ex: "9.4 kWh")
+  Widget _solarMiniStat(String label, String? txt) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label.toUpperCase(), style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+            letterSpacing: 1.1, color: appLabelColor)),
+        const SizedBox(height: 3),
+        Text(txt ?? '--',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 15,
+                fontWeight: FontWeight.w500, color: Color(0xFFE8EAF0))),
+      ]),
+    );
+  }
+
+  // Variante numérique (W) de _solarMiniStat, pour PV1-4 individuels
+  Widget _solarMiniStatW(String label, double? w) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label.toUpperCase(), style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+            letterSpacing: 1.1, color: appLabelColor)),
+        const SizedBox(height: 3),
+        Text(w != null ? '${w.round()} W' : '--',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 15,
+                fontWeight: FontWeight.w500, color: Color(0xFFE8EAF0))),
+      ]),
+    );
+  }
+
   Widget _buildDots() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        for (var i = 0; i < _espConfigs.length; i++)
+        for (var i = 0; i < _totalPages; i++)
           GestureDetector(
             onTap: () => _pageController.animateToPage(i,
                 duration: const Duration(milliseconds: 300),
@@ -1428,7 +2777,7 @@ class _HomeScreenState extends State<HomeScreen> {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(4),
                 color: i == _currentPage
-                    ? const Color(0xFFF97316)
+                    ? (_isSolarPage(i) ? const Color(0xFFFACC15) : const Color(0xFFF97316))
                     : Colors.white.withOpacity(0.3),
               ),
             ),
@@ -1720,6 +3069,125 @@ class GaugeWidget extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+// ── Jauge de puissance (valeur libre en W, max dynamique) ─────────────────────
+class PowerGaugeWidget extends StatelessWidget {
+  final double value;    // en W, peut être 0
+  final bool hasValue;
+  final double size;
+  final double? maxValue; // si fourni (config), sinon calcul dynamique
+  const PowerGaugeWidget({super.key, required this.value, required this.hasValue,
+    this.size = 190, this.maxValue});
+
+  static const List<Color> _gaugeColors = [
+    Color(0xFF3B82F6), // bleu (faible)
+    Color(0xFF22C55E), // vert
+    Color(0xFFFACC15), // jaune
+    Color(0xFFF97316), // orange (fort)
+  ];
+
+  Color _colorAt(double t) {
+    final clamped = t.clamp(0.0, 1.0);
+    final scaled = clamped * (_gaugeColors.length - 1);
+    final i = scaled.floor().clamp(0, _gaugeColors.length - 2);
+    final localT = scaled - i;
+    return Color.lerp(_gaugeColors[i], _gaugeColors[i + 1], localT)!;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Max fourni par la config si dispo (>0), sinon calcul dynamique de secours
+    final maxVal = (maxValue != null && maxValue! > 0)
+        ? maxValue!
+        : (value < 2500 ? 3000.0 : (value * 1.2).ceilToDouble());
+    final progress = hasValue ? (value / maxVal).clamp(0.0, 1.0) : 0.0;
+
+    return SizedBox(
+      width: size, height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: progress),
+            duration: const Duration(milliseconds: 800),
+            curve: Curves.easeInOut,
+            builder: (_, v, __) => CustomPaint(
+              size: Size(size, size),
+              painter: _GaugePainter(v, _gaugeColors, _colorAt(v), strokeWidth: size / 13.6),
+            ),
+          ),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                hasValue ? '${value.round()}' : '--',
+                style: const TextStyle(
+                  fontFamily: 'monospace', fontSize: 40,
+                  fontWeight: FontWeight.w500, color: Color(0xFFE8EAF0), height: 1,
+                ),
+              ),
+              Text('watts', style: TextStyle(fontSize: 12, color: appLabelColor, fontFamily: 'monospace')),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Icône batterie visuelle (style pile verticale, comme l'app Izypower) ──────
+class BatteryVisual extends StatelessWidget {
+  final double? socPct; // 0-100, null = inconnu
+  final double width, height;
+  const BatteryVisual({super.key, this.socPct, this.width = 46, this.height = 78});
+
+  Color get _fillColor {
+    final pct = socPct ?? 0;
+    if (pct < 20) return const Color(0xFFF43F5E);
+    if (pct < 50) return const Color(0xFFFACC15);
+    return const Color(0xFF22D3A8);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pct = ((socPct ?? 0).clamp(0, 100)) / 100.0;
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      // Nub (petite borne du haut)
+      Container(
+        width: width * 0.36, height: 6,
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.35),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+        ),
+      ),
+      // Corps de la batterie
+      Container(
+        width: width, height: height,
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.white.withOpacity(0.4), width: 2),
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(5),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: pct.toDouble()),
+              duration: const Duration(milliseconds: 700),
+              curve: Curves.easeInOut,
+              builder: (_, v, __) => FractionallySizedBox(
+                heightFactor: v == 0 ? 0.02 : v,
+                widthFactor: 1,
+                child: Container(color: _fillColor),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ]);
   }
 }
 
@@ -2203,7 +3671,8 @@ class ConfigSheet extends StatefulWidget {
   final String currentDisplayMode;
   final bool   currentMultiSites;
   final Color  currentLabelColor;
-  final Future<void> Function(List<EspConfig>, String, String, bool, Color) onSave;
+  final SolarConfig currentSolarConfig;
+  final Future<void> Function(List<EspConfig>, String, String, bool, Color, SolarConfig) onSave;
   const ConfigSheet({
     super.key,
     required this.currentConfigs,
@@ -2211,6 +3680,7 @@ class ConfigSheet extends StatefulWidget {
     required this.currentDisplayMode,
     required this.currentMultiSites,
     required this.currentLabelColor,
+    required this.currentSolarConfig,
     required this.onSave,
   });
 
@@ -2226,6 +3696,23 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late Color  _labelColor;
   late int _count;
 
+  // ── Suivi solaire ────────────────────────────────────────────────────────
+  late bool _solarEnabled;
+  late bool _sunologyEnabled, _izypowerEnabled, _apsystemsEnabled;
+  late TextEditingController _sunoEmailCtrl, _sunoPwdCtrl;
+  late TextEditingController _izyEmailCtrl, _izyPwdCtrl, _izyStationCtrl, _izyBatterySnCtrl;
+  late TextEditingController _apUserCtrl, _apPwdCtrl;
+  late TextEditingController _totalCapacityCtrl;
+  bool _sunoTesting = false, _izyTesting = false, _apTesting = false;
+  bool _izyDiscovering = false;
+  String? _izyDiscoverError;
+  bool _izyBattDiscovering = false;
+  String? _izyBattDiscoverError;
+  String? _sunoTestResult; // null=non testé, sinon message
+  String? _izyTestResult;
+  String? _apTestResult;
+  bool _sunoTestOk = false, _izyTestOk = false, _apTestOk = false;
+
   // État du test de connexion par ESP
   late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
   late List<List<_TempChoice>?>   _testedTemps;   // null=non testé, []= aucun capteur
@@ -2239,6 +3726,22 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _multiSites  = widget.currentMultiSites;
     _labelColor  = widget.currentLabelColor;
     _count = widget.currentConfigs.length;
+
+    final sc = widget.currentSolarConfig;
+    _solarEnabled     = sc.enabled;
+    _sunologyEnabled  = sc.sunologyEnabled;
+    _izypowerEnabled  = sc.izypowerEnabled;
+    _apsystemsEnabled = sc.apsystemsEnabled;
+    _sunoEmailCtrl    = TextEditingController(text: sc.sunologyEmail);
+    _sunoPwdCtrl      = TextEditingController(text: sc.sunologyPassword);
+    _izyEmailCtrl     = TextEditingController(text: sc.izypowerEmail);
+    _izyPwdCtrl       = TextEditingController(text: sc.izypowerPassword);
+    _izyStationCtrl   = TextEditingController(text: sc.izypowerStationId);
+    _izyBatterySnCtrl = TextEditingController(text: sc.izypowerBatterySn);
+    _apUserCtrl       = TextEditingController(text: sc.apsystemsUsername);
+    _apPwdCtrl        = TextEditingController(text: sc.apsystemsPassword);
+    _totalCapacityCtrl = TextEditingController(
+        text: sc.totalCapacityW > 0 ? sc.totalCapacityW.round().toString() : '');
     _ctrls = widget.currentConfigs.map((c) => {
       'name': TextEditingController(text: c.name),
       'url':  TextEditingController(text: c.url),
@@ -2265,7 +3768,215 @@ class _ConfigSheetState extends State<ConfigSheet> {
       m['url']!.dispose();
       m['pwd']!.dispose();
     }
+    _sunoEmailCtrl.dispose(); _sunoPwdCtrl.dispose();
+    _izyEmailCtrl.dispose();  _izyPwdCtrl.dispose(); _izyStationCtrl.dispose();
+    _izyBatterySnCtrl.dispose();
+    _apUserCtrl.dispose(); _apPwdCtrl.dispose();
+    _totalCapacityCtrl.dispose();
     super.dispose();
+  }
+
+  // ── Test connexion solaire ────────────────────────────────────────────────
+  Future<void> _testSunology() async {
+    setState(() { _sunoTesting = true; _sunoTestResult = null; });
+    try {
+      final client = SunologyClient(email: _sunoEmailCtrl.text.trim(), password: _sunoPwdCtrl.text);
+      await client.login();
+      final panels = await client.getPanels();
+      setState(() {
+        _sunoTestOk = true;
+        _sunoTestResult = panels.isEmpty
+            ? 'Connecté (aucun panneau trouvé)'
+            : 'Connecté · ${panels.length} panneau(x)';
+        _sunoTesting = false;
+      });
+    } catch (e) {
+      // Affiche le détail réel (code HTTP + extrait réponse) pour diagnostiquer
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() { _sunoTestOk = false; _sunoTestResult = msg; _sunoTesting = false; });
+    }
+  }
+
+  Future<void> _testIzypower() async {
+    setState(() { _izyTesting = true; _izyTestResult = null; });
+    final stationId = _izyStationCtrl.text.trim();
+    if (stationId.isEmpty) {
+      setState(() {
+        _izyTestOk = false;
+        _izyTestResult = 'Station ID requis (voir le champ ci-dessus)';
+        _izyTesting = false;
+      });
+      return;
+    }
+    try {
+      final client = IzypowerClient(username: _izyEmailCtrl.text.trim(), password: _izyPwdCtrl.text);
+      final data = await client.fetchStationInfo(stationId);
+
+      var result = 'Connecté · SOC ${data['battery_soc'] ?? '?'}%';
+
+      // Teste aussi le détail batterie si un SN est renseigné, pour valider
+      // le même chemin que celui utilisé par l'app en fonctionnement réel.
+      final sn = _izyBatterySnCtrl.text.trim();
+      if (sn.isNotEmpty) {
+        try {
+          final batt = await client.fetchBatteryDetail(sn);
+          final state = kIzyBatteryStateLabels[asInt(batt['onlineState'])];
+          result += '\nDétail batterie OK · ${state ?? "état inconnu"}';
+        } catch (e) {
+          result += '\n⚠ Détail batterie échoué : ${e.toString().replaceFirst("Exception: ", "")}';
+        }
+      }
+
+      setState(() {
+        _izyTestOk = true;
+        _izyTestResult = result;
+        _izyTesting = false;
+      });
+    } catch (e) {
+      setState(() { _izyTestOk = false; _izyTestResult = 'Échec : identifiants ou station ID invalides ?'; _izyTesting = false; });
+    }
+  }
+
+  // Découverte automatique du Station ID : remplit directement le champ s'il
+  // n'y a qu'une seule station, sinon propose un choix parmi plusieurs.
+  Future<void> _discoverStations() async {
+    if (_izyEmailCtrl.text.trim().isEmpty || _izyPwdCtrl.text.isEmpty) {
+      setState(() => _izyDiscoverError = 'Renseigne d\'abord email + mot de passe');
+      return;
+    }
+    setState(() { _izyDiscovering = true; _izyDiscoverError = null; });
+    try {
+      final client = IzypowerClient(username: _izyEmailCtrl.text.trim(), password: _izyPwdCtrl.text);
+      final stations = await client.fetchStationsList();
+      if (stations.isEmpty) {
+        setState(() { _izyDiscovering = false; _izyDiscoverError = 'Aucune station trouvée sur ce compte'; });
+        return;
+      }
+      if (stations.length == 1) {
+        setState(() {
+          _izyStationCtrl.text = stations.first.id.toString();
+          _izyDiscovering = false;
+        });
+        return;
+      }
+      // Plusieurs stations : proposer un choix
+      setState(() => _izyDiscovering = false);
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<int>(
+        context: context,
+        backgroundColor: const Color(0xFF111827),
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+        builder: (_) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
+              child: Text('Quelle station ?',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                      letterSpacing: 2, color: Color(0xFF5A6278))),
+            ),
+            for (final s in stations)
+              ListTile(
+                title: Text(s.name, style: const TextStyle(color: Color(0xFFE8EAF0))),
+                subtitle: Text('ID ${s.id}',
+                    style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: Color(0xFF5A6278))),
+                leading: const Icon(Icons.solar_power_outlined, color: Color(0xFFF97316)),
+                onTap: () => Navigator.pop(context, s.id),
+              ),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      );
+      if (chosen != null) setState(() => _izyStationCtrl.text = chosen.toString());
+    } catch (e) {
+      setState(() {
+        _izyDiscovering = false;
+        _izyDiscoverError = 'Échec : identifiants invalides ?';
+      });
+    }
+  }
+
+  // Découverte automatique du N° de série batterie, nécessite un Station ID
+  // déjà renseigné (le SN batterie est rattaché à une station précise).
+  Future<void> _discoverBattery() async {
+    if (_izyEmailCtrl.text.trim().isEmpty || _izyPwdCtrl.text.isEmpty) {
+      setState(() => _izyBattDiscoverError = 'Renseigne d\'abord email + mot de passe');
+      return;
+    }
+    final stationId = _izyStationCtrl.text.trim();
+    if (stationId.isEmpty) {
+      setState(() => _izyBattDiscoverError = 'Renseigne d\'abord le Station ID ci-dessus');
+      return;
+    }
+    setState(() { _izyBattDiscovering = true; _izyBattDiscoverError = null; });
+    try {
+      final client = IzypowerClient(username: _izyEmailCtrl.text.trim(), password: _izyPwdCtrl.text);
+      final batteries = await client.fetchBatteriesList(stationId);
+      if (batteries.isEmpty) {
+        setState(() { _izyBattDiscovering = false; _izyBattDiscoverError = 'Aucune batterie trouvée sur cette station'; });
+        return;
+      }
+      if (batteries.length == 1) {
+        setState(() {
+          _izyBatterySnCtrl.text = batteries.first.sn;
+          _izyBattDiscovering = false;
+        });
+        return;
+      }
+      // Plusieurs batteries : proposer un choix
+      setState(() => _izyBattDiscovering = false);
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<String>(
+        context: context,
+        backgroundColor: const Color(0xFF111827),
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+        builder: (_) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
+              child: Text('Quelle batterie ?',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                      letterSpacing: 2, color: Color(0xFF5A6278))),
+            ),
+            for (final b in batteries)
+              ListTile(
+                title: Text(b.name, style: const TextStyle(color: Color(0xFFE8EAF0))),
+                leading: const Icon(Icons.battery_charging_full, color: Color(0xFFF97316)),
+                onTap: () => Navigator.pop(context, b.sn),
+              ),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      );
+      if (chosen != null) setState(() => _izyBatterySnCtrl.text = chosen);
+    } catch (e) {
+      setState(() {
+        _izyBattDiscovering = false;
+        _izyBattDiscoverError = 'Échec : identifiants ou station invalides ?';
+      });
+    }
+  }
+
+  Future<void> _testApSystems() async {
+    setState(() { _apTesting = true; _apTestResult = null; });
+    try {
+      final client = ApSystemsClient(username: _apUserCtrl.text.trim(), password: _apPwdCtrl.text);
+      final inverters = await client.fetchAllInverters();
+      setState(() {
+        _apTestOk = true;
+        _apTestResult = inverters.isEmpty
+            ? 'Connecté (aucun onduleur trouvé)'
+            : 'Connecté · ${inverters.length} onduleur(s)';
+        _apTesting = false;
+      });
+    } catch (e) {
+      setState(() {
+        _apTestOk = false;
+        _apTestResult = 'Échec : Kontoname (pas email) ou mot de passe invalide ?';
+        _apTesting = false;
+      });
+    }
   }
 
   void _addEsp() {
@@ -2567,6 +4278,289 @@ class _ConfigSheetState extends State<ConfigSheet> {
             ),
             const SizedBox(height: 16),
 
+            // ── Suivi solaire ────────────────────────────────────────────────
+            CheckboxListTile(
+              value: _solarEnabled,
+              onChanged: (v) => setState(() => _solarEnabled = v!),
+              title: const Text('Suivi solaire',
+                  style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+              subtitle: const Text('Ajoute un onglet Izypower / Sunology',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+              activeColor: const Color(0xFFF97316),
+              side: BorderSide(color: Colors.white.withOpacity(0.3)),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+            if (_solarEnabled) ...[
+              const SizedBox(height: 8),
+              const Text('Puissance crête installée totale (W)',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF5A6278))),
+              const SizedBox(height: 4),
+              TextField(
+                controller: _totalCapacityCtrl,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 14, color: Color(0xFFE8EAF0)),
+                decoration: _inputDeco('ex: 6000 (laisser vide = auto)'),
+              ),
+              const SizedBox(height: 6),
+              const Text('Calibre la jauge de production totale sur l\'onglet solaire',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+              const SizedBox(height: 12),
+              // Sunology
+              CheckboxListTile(
+                value: _sunologyEnabled,
+                onChanged: (v) => setState(() => _sunologyEnabled = v!),
+                title: const Text('Sunology',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                activeColor: const Color(0xFF3B82F6),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_sunologyEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _sunoEmailCtrl,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Email Sunology'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _sunoPwdCtrl,
+                  obscureText: true,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Mot de passe'),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _sunoTesting ? null : _testSunology,
+                    icon: _sunoTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF3B82F6)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFF3B82F6)),
+                    label: Text(_sunoTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF3B82F6))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF3B82F6), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_sunoTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _sunoTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_sunoTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_sunoTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+                const SizedBox(height: 12),
+              ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // Izypower
+              CheckboxListTile(
+                value: _izypowerEnabled,
+                onChanged: (v) => setState(() => _izypowerEnabled = v!),
+                title: const Text('Izypower',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                activeColor: const Color(0xFFF97316),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_izypowerEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _izyEmailCtrl,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Email Izypower'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _izyPwdCtrl,
+                  obscureText: true,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Mot de passe'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _izyStationCtrl,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Station ID (requis)'),
+                ),
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _izyDiscovering ? null : _discoverStations,
+                    icon: _izyDiscovering
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF97316)))
+                        : const Icon(Icons.search, size: 16, color: Color(0xFFF97316)),
+                    label: Text(_izyDiscovering ? 'Recherche…' : 'Découvrir automatiquement',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFFF97316))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFF97316), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_izyDiscoverError != null) ...[
+                  const SizedBox(height: 4),
+                  Text(_izyDiscoverError!,
+                      style: const TextStyle(fontSize: 11, color: Color(0xFFF43F5E))),
+                ],
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _izyBatterySnCtrl,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('N° série batterie (optionnel, pour détail PV1-4)'),
+                ),
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _izyBattDiscovering ? null : _discoverBattery,
+                    icon: _izyBattDiscovering
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF97316)))
+                        : const Icon(Icons.search, size: 16, color: Color(0xFFF97316)),
+                    label: Text(_izyBattDiscovering ? 'Recherche…' : 'Découvrir automatiquement',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFFF97316))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFF97316), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_izyBattDiscoverError != null) ...[
+                  const SizedBox(height: 4),
+                  Text(_izyBattDiscoverError!,
+                      style: const TextStyle(fontSize: 11, color: Color(0xFFF43F5E))),
+                ],
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _izyTesting ? null : _testIzypower,
+                    icon: _izyTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF97316)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFFF97316)),
+                    label: Text(_izyTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFFF97316))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFF97316), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_izyTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _izyTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_izyTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_izyTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _izyTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_izyTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _izyTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+              ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // AP Systems EasyPower
+              CheckboxListTile(
+                value: _apsystemsEnabled,
+                onChanged: (v) => setState(() => _apsystemsEnabled = v!),
+                title: const Text('EasyPower (APsystems)',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                activeColor: const Color(0xFF22C55E),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_apsystemsEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _apUserCtrl,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Kontoname (PAS l\'email !)'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _apPwdCtrl,
+                  obscureText: true,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Mot de passe'),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _apTesting ? null : _testApSystems,
+                    icon: _apTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF22C55E)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFF22C55E)),
+                    label: Text(_apTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF22C55E))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF22C55E), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_apTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _apTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_apTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_apTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _apTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_apTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _apTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+              ],
+            ],
+            const SizedBox(height: 16),
+
             // ── Affichage (uniquement si plusieurs ESP) ──────────────────────
             if (_count > 1) ...[
               Text('Affichage',
@@ -2659,7 +4653,22 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       enabledTempIndices: enabledTemps,
                     );
                   }).toList();
-                  await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor);
+                  final solarConfig = SolarConfig(
+                    enabled: _solarEnabled,
+                    sunologyEnabled: _sunologyEnabled,
+                    sunologyEmail: _sunoEmailCtrl.text.trim(),
+                    sunologyPassword: _sunoPwdCtrl.text,
+                    izypowerEnabled: _izypowerEnabled,
+                    izypowerEmail: _izyEmailCtrl.text.trim(),
+                    izypowerPassword: _izyPwdCtrl.text,
+                    izypowerStationId: _izyStationCtrl.text.trim(),
+                    izypowerBatterySn: _izyBatterySnCtrl.text.trim(),
+                    apsystemsEnabled: _apsystemsEnabled,
+                    apsystemsUsername: _apUserCtrl.text.trim(),
+                    apsystemsPassword: _apPwdCtrl.text,
+                    totalCapacityW: double.tryParse(_totalCapacityCtrl.text.trim()) ?? 0,
+                  );
+                  await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor, solarConfig);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
