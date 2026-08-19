@@ -40,7 +40,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.7.0';
+const String appVersion = '4.7.2';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -256,6 +256,7 @@ class SolarConfig {
   final bool apsystemsEnabled;
   final String apsystemsUsername; // "Kontoname" de l'app, PAS l'email
   final String apsystemsPassword;
+  final List<String> apsystemsOrder; // ordre d'affichage voulu (devId), vide = ordre naturel
   final double totalCapacityW; // puissance crête installée totale (W), pour calibrer la jauge
   const SolarConfig({
     this.enabled = false,
@@ -270,6 +271,7 @@ class SolarConfig {
     this.apsystemsEnabled = false,
     this.apsystemsUsername = '',
     this.apsystemsPassword = '',
+    this.apsystemsOrder = const [],
     this.totalCapacityW = 0,
   });
 
@@ -277,7 +279,7 @@ class SolarConfig {
     bool? enabled, bool? sunologyEnabled, String? sunologyEmail, String? sunologyPassword,
     bool? izypowerEnabled, String? izypowerEmail, String? izypowerPassword, String? izypowerStationId,
     String? izypowerBatterySn, bool? apsystemsEnabled, String? apsystemsUsername,
-    String? apsystemsPassword, double? totalCapacityW,
+    String? apsystemsPassword, List<String>? apsystemsOrder, double? totalCapacityW,
   }) {
     return SolarConfig(
       enabled: enabled ?? this.enabled,
@@ -292,6 +294,7 @@ class SolarConfig {
       apsystemsEnabled: apsystemsEnabled ?? this.apsystemsEnabled,
       apsystemsUsername: apsystemsUsername ?? this.apsystemsUsername,
       apsystemsPassword: apsystemsPassword ?? this.apsystemsPassword,
+      apsystemsOrder: apsystemsOrder ?? this.apsystemsOrder,
       totalCapacityW: totalCapacityW ?? this.totalCapacityW,
     );
   }
@@ -309,6 +312,7 @@ class SolarConfig {
     'apsystems_enabled': apsystemsEnabled,
     'apsystems_username': apsystemsUsername,
     'apsystems_password': apsystemsPassword,
+    'apsystems_order': apsystemsOrder,
     'total_capacity_w': totalCapacityW,
   };
 
@@ -325,6 +329,7 @@ class SolarConfig {
     apsystemsEnabled: j['apsystems_enabled'] as bool? ?? false,
     apsystemsUsername: j['apsystems_username'] as String? ?? '',
     apsystemsPassword: j['apsystems_password'] as String? ?? '',
+    apsystemsOrder: (j['apsystems_order'] as List?)?.cast<String>() ?? const [],
     totalCapacityW: (j['total_capacity_w'] as num?)?.toDouble() ?? 0,
   );
 }
@@ -2344,6 +2349,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final hasSuno = _solarConfig.sunologyEnabled;
     final hasAp   = _solarConfig.apsystemsEnabled;
 
+    // Tri des onduleurs EasyPower selon l'ordre choisi par l'utilisateur
+    // (par devId, stable même si le nom change) — les onduleurs non
+    // répertoriés dans l'ordre (nouveaux, jamais configurés) passent en fin,
+    // dans leur ordre naturel de découverte.
+    final apInvertersSorted = List<ApSystemsInverter>.from(s.apsystemsInverters);
+    if (_solarConfig.apsystemsOrder.isNotEmpty) {
+      final order = _solarConfig.apsystemsOrder;
+      apInvertersSorted.sort((a, b) {
+        final ia = order.indexOf(a.devId);
+        final ib = order.indexOf(b.devId);
+        final ra = ia == -1 ? order.length + apInvertersSorted.indexOf(a) : ia;
+        final rb = ib == -1 ? order.length + apInvertersSorted.indexOf(b) : ib;
+        return ra.compareTo(rb);
+      });
+    }
+
     Widget content = SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
       child: Column(children: [
@@ -2352,7 +2373,7 @@ class _HomeScreenState extends State<HomeScreen> {
             style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
                 letterSpacing: 2, color: appLabelColor)),
         const SizedBox(height: 10),
-        PowerGaugeWidget(value: totalPv, hasValue: (s.izyOk || s.sunologyOk),
+        PowerGaugeWidget(value: totalPv, hasValue: (s.izyOk || s.sunologyOk || s.apsystemsOk),
             maxValue: _solarConfig.totalCapacityW),
         const SizedBox(height: 20),
 
@@ -2530,13 +2551,13 @@ class _HomeScreenState extends State<HomeScreen> {
         if (hasAp) ...[
           _solarSectionHeader('EASYPOWER', const Color(0xFF22C55E), s.apsystemsOk, s.apsystemsStatus),
           const SizedBox(height: 10),
-          if (s.apsystemsInverters.isEmpty)
+          if (apInvertersSorted.isEmpty)
             Text('Aucun onduleur trouvé', style: TextStyle(fontSize: 12, color: appLabelColor))
           else
-            for (var i = 0; i < s.apsystemsInverters.length; i++) ...[
+            for (var i = 0; i < apInvertersSorted.length; i++) ...[
               if (i > 0) const SizedBox(height: 12),
               Builder(builder: (_) {
-                final inv = s.apsystemsInverters[i];
+                final inv = apInvertersSorted[i];
                 String? kwh(double? v) => v != null ? '${v.toStringAsFixed(2)} kWh' : null;
                 return Container(
                   padding: const EdgeInsets.all(14),
@@ -3712,6 +3733,9 @@ class _ConfigSheetState extends State<ConfigSheet> {
   String? _izyTestResult;
   String? _apTestResult;
   bool _sunoTestOk = false, _izyTestOk = false, _apTestOk = false;
+  // Liste des onduleurs découverts au test, dans l'ordre choisi par l'utilisateur
+  // (devId + nom) — réordonnable avec les boutons haut/bas.
+  List<({String devId, String name})>? _apDiscoveredInverters;
 
   // État du test de connexion par ESP
   late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
@@ -3963,11 +3987,27 @@ class _ConfigSheetState extends State<ConfigSheet> {
     try {
       final client = ApSystemsClient(username: _apUserCtrl.text.trim(), password: _apPwdCtrl.text);
       final inverters = await client.fetchAllInverters();
+
+      // Construit la liste réordonnable : respecte l'ordre déjà sauvegardé
+      // s'il existe, puis ajoute les nouveaux onduleurs (jamais vus) à la fin.
+      final discovered = inverters.map((i) => (devId: i.devId, name: i.name)).toList();
+      final savedOrder = widget.currentSolarConfig.apsystemsOrder;
+      if (savedOrder.isNotEmpty) {
+        discovered.sort((a, b) {
+          final ia = savedOrder.indexOf(a.devId);
+          final ib = savedOrder.indexOf(b.devId);
+          final ra = ia == -1 ? savedOrder.length + discovered.indexOf(a) : ia;
+          final rb = ib == -1 ? savedOrder.length + discovered.indexOf(b) : ib;
+          return ra.compareTo(rb);
+        });
+      }
+
       setState(() {
         _apTestOk = true;
         _apTestResult = inverters.isEmpty
             ? 'Connecté (aucun onduleur trouvé)'
             : 'Connecté · ${inverters.length} onduleur(s)';
+        _apDiscoveredInverters = discovered;
         _apTesting = false;
       });
     } catch (e) {
@@ -3977,6 +4017,18 @@ class _ConfigSheetState extends State<ConfigSheet> {
         _apTesting = false;
       });
     }
+  }
+
+  void _moveApInverter(int index, int delta) {
+    if (_apDiscoveredInverters == null) return;
+    final newIndex = index + delta;
+    if (newIndex < 0 || newIndex >= _apDiscoveredInverters!.length) return;
+    setState(() {
+      final list = List<({String devId, String name})>.from(_apDiscoveredInverters!);
+      final item = list.removeAt(index);
+      list.insert(newIndex, item);
+      _apDiscoveredInverters = list;
+    });
   }
 
   void _addEsp() {
@@ -4557,6 +4609,48 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     ]),
                   ),
                 ],
+                // Réordonnancement des onduleurs (si plusieurs découverts)
+                if (_apDiscoveredInverters != null && _apDiscoveredInverters!.length > 1) ...[
+                  const SizedBox(height: 10),
+                  Text('Ordre d\'affichage',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                          letterSpacing: 1.2, color: appLabelColor)),
+                  const SizedBox(height: 6),
+                  for (var i = 0; i < _apDiscoveredInverters!.length; i++)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0A0F1A),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white.withOpacity(0.08)),
+                      ),
+                      child: Row(children: [
+                        Text('${i + 1}.', style: TextStyle(fontSize: 12, color: appLabelColor)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(_apDiscoveredInverters![i].name,
+                              style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.keyboard_arrow_up, size: 20),
+                          color: i == 0 ? appLabelColor.withOpacity(0.3) : const Color(0xFF22C55E),
+                          onPressed: i == 0 ? null : () => _moveApInverter(i, -1),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.keyboard_arrow_down, size: 20),
+                          color: i == _apDiscoveredInverters!.length - 1
+                              ? appLabelColor.withOpacity(0.3) : const Color(0xFF22C55E),
+                          onPressed: i == _apDiscoveredInverters!.length - 1
+                              ? null : () => _moveApInverter(i, 1),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        ),
+                      ]),
+                    ),
+                ],
               ],
             ],
             const SizedBox(height: 16),
@@ -4666,6 +4760,9 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     apsystemsEnabled: _apsystemsEnabled,
                     apsystemsUsername: _apUserCtrl.text.trim(),
                     apsystemsPassword: _apPwdCtrl.text,
+                    apsystemsOrder: _apDiscoveredInverters != null
+                        ? _apDiscoveredInverters!.map((i) => i.devId).toList()
+                        : widget.currentSolarConfig.apsystemsOrder,
                     totalCapacityW: double.tryParse(_totalCapacityCtrl.text.trim()) ?? 0,
                   );
                   await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor, solarConfig);
