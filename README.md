@@ -50,6 +50,8 @@ v..... - Debug et améliorations non publiées
 
 v4.6.3 - Intégration Suivi Solaire pour : Izypower / Sunology / EasyPower(APsystems)
 
+v4.7.0 - Ajout info date/heure dans graphiques
+
 --------
 
 
