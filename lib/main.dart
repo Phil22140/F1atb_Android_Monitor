@@ -40,7 +40,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.6.3';
+const String appVersion = '4.7.0';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -4897,6 +4897,7 @@ class _ChartsPageState extends State<ChartsPage>
 
   bool   _loading10 = true,  _loading48 = true,  _loading1an = true;
   String _status10  = '…',   _status48  = '…',   _status1an  = '…';
+  DateTime? _lastRefresh10, _lastRefresh48; // ancre pour calculer l'horodatage de chaque point
 
   @override
   void initState() {
@@ -5050,6 +5051,7 @@ class _ChartsPageState extends State<ChartsPage>
           if (_ouvBufs[m.numAction]!.length > kMax10) _ouvBufs[m.numAction]!.removeAt(0);
         }
         _loading10 = false; _status10 = TimeOfDay.now().format(context);
+        _lastRefresh10 = DateTime.now();
       });
     } catch (_) { if (mounted) setState(() => _status10 = 'erreur'); }
   }
@@ -5110,6 +5112,7 @@ class _ChartsPageState extends State<ChartsPage>
         _ouvNoms48 = ouvData.map((o) => o.nom).toList();
         _loading48 = false;
         _status48  = TimeOfDay.now().format(context);
+        _lastRefresh48 = DateTime.now();
       });
     } catch (_) {
       if (mounted) setState(() { _loading48 = false; _status48 = 'erreur'; });
@@ -5193,15 +5196,21 @@ class _ChartsPageState extends State<ChartsPage>
     }
   }
 
+  // endTime = horodatage du DERNIER point de la série (généralement "maintenant"
+  // au moment du dernier refresh) ; interval = écart réel entre 2 points
+  // consécutifs (2s pour les séries 10mn, ~10mn pour les séries 48h).
+  // Permet de calculer et d'afficher la date/heure de la mesure dans l'infobulle.
   Widget _buildChart({required String title, required List<List<double>> series,
     required List<Color> colors, required List<String> labels, String unit = 'W',
-    double? forceMinY, double? forceMaxY}) {
+    double? forceMinY, double? forceMaxY, DateTime? endTime, Duration? interval}) {
     if (series.every((s) => s.isEmpty)) return const SizedBox.shrink();
     double maxY = 0, minY = 0;
     for (final s in series) for (final v in s) { if (v > maxY) maxY = v; if (v < minY) minY = v; }
     maxY = forceMaxY ?? (maxY < 10 ? 10 : maxY * 1.15);
     minY = forceMinY ?? (minY > -10 ? (minY < 0 ? minY * 1.15 : 0) : minY * 1.15);
     final bars = <LineChartBarData>[];
+    // Nombre de points de la plus longue série (pour ancrer le calcul d'horodatage)
+    final maxLen = series.map((s) => s.length).fold(0, (a, b) => a > b ? a : b);
     for (var i = 0; i < series.length; i++) {
       if (series[i].isEmpty) continue;
       bars.add(LineChartBarData(
@@ -5211,6 +5220,24 @@ class _ChartsPageState extends State<ChartsPage>
         belowBarData: BarAreaData(show: true, color: colors[i % colors.length].withOpacity(0.08)),
       ));
     }
+
+    // Formatte la date/heure du point d'index x (en supposant un intervalle
+    // régulier remontant depuis endTime, qui correspond au dernier point)
+    String? timestampFor(double x) {
+      if (endTime == null || interval == null || maxLen <= 1) return null;
+      final pointsFromEnd = (maxLen - 1) - x;
+      final t = endTime.subtract(interval * pointsFromEnd);
+      final hh = t.hour.toString().padLeft(2, '0');
+      final mm = t.minute.toString().padLeft(2, '0');
+      final ss = t.second.toString().padLeft(2, '0');
+      // Affiche le jour seulement si différent d'aujourd'hui (utile pour le 48h)
+      final now = DateTime.now();
+      final sameDay = t.year == now.year && t.month == now.month && t.day == now.day;
+      final dd = t.day.toString().padLeft(2, '0');
+      final mo = t.month.toString().padLeft(2, '0');
+      return sameDay ? '$hh:$mm:$ss' : '$dd/$mo $hh:$mm';
+    }
+
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
@@ -5247,10 +5274,16 @@ class _ChartsPageState extends State<ChartsPage>
           ),
           minY: minY, maxY: maxY, lineBarsData: bars,
           lineTouchData: LineTouchData(touchTooltipData: LineTouchTooltipData(
-              getTooltipItems: (spots) => spots.map((s) => LineTooltipItem(
-                  '${s.y.toStringAsFixed(0)}$unit',
+              fitInsideVertically: true,
+              fitInsideHorizontally: true,
+              getTooltipItems: (spots) => spots.map((s) {
+                final ts = timestampFor(s.x);
+                return LineTooltipItem(
+                  ts != null ? '${s.y.toStringAsFixed(0)}$unit\n$ts' : '${s.y.toStringAsFixed(0)}$unit',
                   TextStyle(color: colors[s.barIndex % colors.length],
-                      fontSize: 11, fontWeight: FontWeight.w600))).toList())),
+                      fontSize: 11, fontWeight: FontWeight.w600),
+                );
+              }).toList())),
         ))),
       ]),
     );
@@ -5399,6 +5432,7 @@ class _ChartsPageState extends State<ChartsPage>
     List<List<double>>? ouvsList,    // 48h : liste de séries d'ouvertures
     List<String>?       ouvsNoms,    // 48h : noms des modules d'ouvertures
     List<ModuleData>? modules, required String windowLabel,
+    DateTime? endTime, Duration? interval, // pour l'horodatage affiché en infobulle
   }) {
     if (loading) return const Center(child: CircularProgressIndicator(color: Color(0xFFF97316), strokeWidth: 2));
     final nomS1 = _nomSonde1.isNotEmpty ? _nomSonde1.toUpperCase() : 'SONDE';
@@ -5411,17 +5445,18 @@ class _ChartsPageState extends State<ChartsPage>
         title: 'PUISSANCE $nomS1 · $windowLabel',
         series: [pwM, if (hasVAM) pvaM],
         colors: [const Color(0xFFF43F5E), const Color(0xFF22D3A8)],
-        labels: ['W', if (hasVAM) 'VA']));
+        labels: ['W', if (hasVAM) 'VA'], endTime: endTime, interval: interval));
     if (pwT.isNotEmpty && nomS2.isNotEmpty) charts.add(_buildChart(
         title: 'PUISSANCE $nomS2 · $windowLabel',
         series: [pwT, if (hasVAT) pvaT],
         colors: [const Color(0xFF3B82F6), const Color(0xFFA855F7)],
-        labels: ['W', if (hasVAT) 'VA']));
+        labels: ['W', if (hasVAT) 'VA'], endTime: endTime, interval: interval));
     if (tempBufs != null) for (var i = 0; i < 4; i++) {
       if (tempBufs[i].isNotEmpty && i < _capteurInfos.length && _capteurInfos[i].actif)
         charts.add(_buildChart(
             title: 'TEMPÉRATURE · ${_capteurInfos[i].nom.toUpperCase()}',
-            series: [tempBufs[i]], colors: [tc[i]], labels: [_capteurInfos[i].nom], unit: '°C'));
+            series: [tempBufs[i]], colors: [tc[i]], labels: [_capteurInfos[i].nom], unit: '°C',
+            endTime: endTime, interval: interval));
     }
     // Températures depuis histo (48h/1an)
     if (tempsList != null) for (var i = 0; i < tempsList.length; i++) {
@@ -5429,7 +5464,8 @@ class _ChartsPageState extends State<ChartsPage>
         final nom = i < _capteurInfos.length ? _capteurInfos[i].nom : 'Capteur ${i+1}';
         charts.add(_buildChart(
             title: 'TEMPÉRATURE · ${nom.toUpperCase()}',
-            series: [tempsList[i]], colors: [tc[i % tc.length]], labels: [nom], unit: '°C'));
+            series: [tempsList[i]], colors: [tc[i % tc.length]], labels: [nom], unit: '°C',
+            endTime: endTime, interval: interval));
       }
     }
     // Ouvertures depuis buffer 10mn
@@ -5438,7 +5474,7 @@ class _ChartsPageState extends State<ChartsPage>
       if (buf.isNotEmpty) charts.add(_buildChart(
           title: 'OUVERTURE · ${modules[mi].nom.toUpperCase()}',
           series: [buf], colors: [oc[mi % oc.length]], labels: [modules[mi].nom],
-          unit: '%', forceMinY: 0, forceMaxY: 100));
+          unit: '%', forceMinY: 0, forceMaxY: 100, endTime: endTime, interval: interval));
     }
     // Ouvertures depuis histo (48h/1an)
     if (ouvsList != null) for (var i = 0; i < ouvsList.length; i++) {
@@ -5450,7 +5486,7 @@ class _ChartsPageState extends State<ChartsPage>
         charts.add(_buildChart(
             title: 'OUVERTURE · ${nom.toUpperCase()}',
             series: [ouvsList[i]], colors: [oc[i % oc.length]], labels: [nom],
-            unit: '%', forceMinY: 0, forceMaxY: 100));
+            unit: '%', forceMinY: 0, forceMaxY: 100, endTime: endTime, interval: interval));
       }
     }
     if (charts.isEmpty) return Center(child: Text('Aucune donnée ($status)',
@@ -5485,11 +5521,13 @@ class _ChartsPageState extends State<ChartsPage>
           _buildTabContent(loading: _loading10, status: _status10,
               pwM: _pwM10, pvaM: _pvaM10, pwT: _pwT10, pvaT: _pvaT10,
               tempBufs: _tempBufs10, ouvBufs: _ouvBufs, modules: _modules,
-              windowLabel: '10 MN'),
+              windowLabel: '10 MN',
+              endTime: _lastRefresh10, interval: const Duration(seconds: 2)),
           _buildTabContent(loading: _loading48, status: _status48,
               pwM: _pwM48, pvaM: _pvaM48, pwT: _pwT48, pvaT: _pvaT48,
               tempsList: _temps48, ouvsList: _ouvs48, ouvsNoms: _ouvNoms48,
-              windowLabel: '48 H'),
+              windowLabel: '48 H',
+              endTime: _lastRefresh48, interval: const Duration(minutes: 10)),
           // ── Onglet 1 AN ─────────────────────────────────────────────────
           _loading1an
               ? const Center(child: CircularProgressIndicator(
