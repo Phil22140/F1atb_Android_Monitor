@@ -7,10 +7,12 @@ import 'package:basic_utils/basic_utils.dart' show CryptoUtils;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:hashlib/hashlib.dart' show Argon2, Argon2Type;
 import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/export.dart' show
 RSAPublicKey, PKCS1Encoding, RSAEngine, PublicKeyParameter,
-CBCBlockCipher, AESEngine, ParametersWithIV, KeyParameter;
+CBCBlockCipher, AESEngine, ParametersWithIV, KeyParameter,
+MD5Digest, SHA256Digest;
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Client HTTP natif, plus permissif que le package http ─────────────────────
@@ -40,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.7.5';
+const String appVersion = '4.8.1';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -257,6 +259,9 @@ class SolarConfig {
   final String apsystemsUsername; // "Kontoname" de l'app, PAS l'email
   final String apsystemsPassword;
   final List<String> apsystemsOrder; // ordre d'affichage voulu (devId), vide = ordre naturel
+  final bool hoymilesEnabled;
+  final String hoymilesUsername;
+  final String hoymilesPassword;
   final double totalCapacityW; // puissance crête installée totale (W), pour calibrer la jauge
   const SolarConfig({
     this.enabled = false,
@@ -272,6 +277,9 @@ class SolarConfig {
     this.apsystemsUsername = '',
     this.apsystemsPassword = '',
     this.apsystemsOrder = const [],
+    this.hoymilesEnabled = false,
+    this.hoymilesUsername = '',
+    this.hoymilesPassword = '',
     this.totalCapacityW = 0,
   });
 
@@ -279,7 +287,9 @@ class SolarConfig {
     bool? enabled, bool? sunologyEnabled, String? sunologyEmail, String? sunologyPassword,
     bool? izypowerEnabled, String? izypowerEmail, String? izypowerPassword, String? izypowerStationId,
     String? izypowerBatterySn, bool? apsystemsEnabled, String? apsystemsUsername,
-    String? apsystemsPassword, List<String>? apsystemsOrder, double? totalCapacityW,
+    String? apsystemsPassword, List<String>? apsystemsOrder,
+    bool? hoymilesEnabled, String? hoymilesUsername, String? hoymilesPassword,
+    double? totalCapacityW,
   }) {
     return SolarConfig(
       enabled: enabled ?? this.enabled,
@@ -295,6 +305,9 @@ class SolarConfig {
       apsystemsUsername: apsystemsUsername ?? this.apsystemsUsername,
       apsystemsPassword: apsystemsPassword ?? this.apsystemsPassword,
       apsystemsOrder: apsystemsOrder ?? this.apsystemsOrder,
+      hoymilesEnabled: hoymilesEnabled ?? this.hoymilesEnabled,
+      hoymilesUsername: hoymilesUsername ?? this.hoymilesUsername,
+      hoymilesPassword: hoymilesPassword ?? this.hoymilesPassword,
       totalCapacityW: totalCapacityW ?? this.totalCapacityW,
     );
   }
@@ -313,6 +326,9 @@ class SolarConfig {
     'apsystems_username': apsystemsUsername,
     'apsystems_password': apsystemsPassword,
     'apsystems_order': apsystemsOrder,
+    'hoymiles_enabled': hoymilesEnabled,
+    'hoymiles_username': hoymilesUsername,
+    'hoymiles_password': hoymilesPassword,
     'total_capacity_w': totalCapacityW,
   };
 
@@ -330,6 +346,9 @@ class SolarConfig {
     apsystemsUsername: j['apsystems_username'] as String? ?? '',
     apsystemsPassword: j['apsystems_password'] as String? ?? '',
     apsystemsOrder: (j['apsystems_order'] as List?)?.cast<String>() ?? const [],
+    hoymilesEnabled: j['hoymiles_enabled'] as bool? ?? false,
+    hoymilesUsername: j['hoymiles_username'] as String? ?? '',
+    hoymilesPassword: j['hoymiles_password'] as String? ?? '',
     totalCapacityW: (j['total_capacity_w'] as num?)?.toDouble() ?? 0,
   );
 }
@@ -359,6 +378,10 @@ class SolarState {
   final List<ApSystemsInverter> apsystemsInverters;
   final bool apsystemsOk;
   final String apsystemsStatus;
+  // Hoymiles S-Miles Cloud — une ou plusieurs centrales
+  final List<HoymilesStation> hoymilesStations;
+  final bool hoymilesOk;
+  final String hoymilesStatus;
 
   const SolarState({
     this.sunologyPvW, this.sunologyDayTxt, this.sunologyWeekTxt,
@@ -374,6 +397,8 @@ class SolarState {
     this.izyTodayKwh, this.izyMonthKwh, this.izyLifetimeKwh,
     this.apsystemsInverters = const [],
     this.apsystemsOk = false, this.apsystemsStatus = 'connexion…',
+    this.hoymilesStations = const [],
+    this.hoymilesOk = false, this.hoymilesStatus = 'connexion…',
   });
 
   SolarState copyWith({
@@ -390,6 +415,8 @@ class SolarState {
     double? izyTodayKwh, double? izyMonthKwh, double? izyLifetimeKwh,
     List<ApSystemsInverter>? apsystemsInverters,
     bool? apsystemsOk, String? apsystemsStatus,
+    List<HoymilesStation>? hoymilesStations,
+    bool? hoymilesOk, String? hoymilesStatus,
   }) {
     return SolarState(
       sunologyPvW: sunologyPvW ?? this.sunologyPvW,
@@ -424,6 +451,9 @@ class SolarState {
       apsystemsInverters: apsystemsInverters ?? this.apsystemsInverters,
       apsystemsOk: apsystemsOk ?? this.apsystemsOk,
       apsystemsStatus: apsystemsStatus ?? this.apsystemsStatus,
+      hoymilesStations: hoymilesStations ?? this.hoymilesStations,
+      hoymilesOk: hoymilesOk ?? this.hoymilesOk,
+      hoymilesStatus: hoymilesStatus ?? this.hoymilesStatus,
     );
   }
 }
@@ -905,6 +935,284 @@ class ApSystemsClient {
   }
 }
 
+// ── Client API Hoymiles S-Miles Cloud ──────────────────────────────────────────
+// Auth multi-profils (web / installer / home), avec repli en cascade — Hoymiles
+// segmente ses comptes par "famille" (web/installateur/app grand public), il n'y a
+// pas un seul flow qui marche pour tout le monde. Hash de mot de passe Argon2id
+// (si l'API renvoie un sel) ou variantes non salées (MD5+SHA256 / SHA256 seul) en
+// repli. Rate-limit strict : ne JAMAIS interroger plus souvent que toutes les 15mn.
+
+class HoymilesStation {
+  final String id;
+  final String name;
+  final double? powerW;
+  final double? todayKwh, monthKwh, yearKwh, totalKwh;
+  final String? lastDataTime; // horodatage brut renvoyé par l'API (affiché tel quel)
+  const HoymilesStation({
+    required this.id, required this.name,
+    this.powerW, this.todayKwh, this.monthKwh, this.yearKwh, this.totalKwh,
+    this.lastDataTime,
+  });
+}
+
+class _HoymilesProfile {
+  final String userAgent;
+  final String? appVersion;
+  final String? xClientType;
+  final bool isSmilesApp; // format spécial "sma/ad/{version}/{tid}/{dc}"
+  final int? tid, dc;
+  final String baseUrl;
+  const _HoymilesProfile({
+    required this.userAgent, this.appVersion, this.xClientType,
+    this.isSmilesApp = false, this.tid, this.dc, required this.baseUrl,
+  });
+}
+
+class HoymilesClient {
+  static const String baseUrl   = 'https://neapi.hoymiles.com';
+  static const String euBaseUrl = 'https://euapi.hoymiles.com';
+
+  static const Map<String, _HoymilesProfile> _profiles = {
+    'web': _HoymilesProfile(userAgent: 'HomeAssistant-HoymilesCloud', baseUrl: baseUrl),
+    'installer': _HoymilesProfile(userAgent: 'S-Miles Installer', appVersion: '3.7.1',
+        xClientType: 'mobile', baseUrl: baseUrl),
+    // Auth du profil "home" doit cibler l'hôte EU directement (sinon redirection
+    // qui invalide le nonce) ; les appels de données ensuite repassent par baseUrl.
+    'home': _HoymilesProfile(userAgent: 'sma/ad', appVersion: '2.10.0',
+        isSmilesApp: true, tid: 159, dc: 0, baseUrl: euBaseUrl),
+  };
+
+  final String username, password;
+  String? _token;
+  String? _workingProfile; // profil qui a réussi le login, réutilisé pour la suite
+
+  HoymilesClient({required this.username, required this.password});
+
+  Map<String, String> _buildHeaders(String profileName, {bool withToken = false}) {
+    final p = _profiles[profileName]!;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+    if (p.isSmilesApp) {
+      headers['User-Agent'] = '${p.userAgent}/${p.appVersion}/${p.tid}/${p.dc}';
+    } else if (p.appVersion != null) {
+      headers['User-Agent'] = '${p.userAgent}/${p.appVersion}';
+      headers['App-Version'] = p.appVersion!;
+      if (p.xClientType != null) headers['X-Client-Type'] = p.xClientType!;
+    } else {
+      headers['User-Agent'] = p.userAgent;
+    }
+    if (withToken && _token != null) {
+      headers['Authorization'] = _token!; // token brut, PAS de préfixe "Bearer "
+    }
+    return headers;
+  }
+
+  Future<Map<String, dynamic>> _postJson(
+      String url, Map<String, dynamic> body, Map<String, String> headers) async {
+    final client = HttpClient();
+    try {
+      final req = await client.postUrl(Uri.parse(url));
+      headers.forEach((k, v) => req.headers.set(k, v));
+      final bytes = utf8.encode(jsonEncode(body));
+      req.contentLength = bytes.length;
+      req.add(bytes);
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final text = await resp.transform(utf8.decoder).join();
+      try {
+        return jsonDecode(text) as Map<String, dynamic>;
+      } catch (_) {
+        return {'status': null, 'message': 'réponse non-JSON', 'data': {}};
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  bool _isOk(Map<String, dynamic> resp) =>
+      resp['status'] == '0' && resp['message'] == 'success';
+
+  // Décodage du sel "a" : hex si longueur paire, sinon base64, sinon bytes bruts
+  List<int> _decodeSalt(String saltValue) {
+    final normalized = saltValue.trim();
+    if (normalized.length % 2 == 0) {
+      try {
+        final bytes = <int>[];
+        for (var i = 0; i < normalized.length; i += 2) {
+          bytes.add(int.parse(normalized.substring(i, i + 2), radix: 16));
+        }
+        return bytes;
+      } catch (_) {}
+    }
+    try {
+      return base64.decode(normalized);
+    } catch (_) {
+      return utf8.encode(normalized);
+    }
+  }
+
+  String _hex(List<int> bytes) =>
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  String _md5Hex(List<int> data) {
+    final digest = MD5Digest();
+    final out = Uint8List(digest.digestSize);
+    final input = Uint8List.fromList(data);
+    digest.update(input, 0, input.length);
+    digest.doFinal(out, 0);
+    return _hex(out);
+  }
+
+  List<int> _sha256Bytes(List<int> data) {
+    final digest = SHA256Digest();
+    final out = Uint8List(digest.digestSize);
+    final input = Uint8List.fromList(data);
+    digest.update(input, 0, input.length);
+    digest.doFinal(out, 0);
+    return out;
+  }
+
+  // Argon2id — paramètres exacts confirmés par reverse engineering :
+  // time_cost=3, memory_cost=32768 KiB, parallelism=1, hash_len=32, type=ID
+  String _argon2Hash(String pwd, String saltB64) {
+    final saltBytes = _decodeSalt(saltB64);
+    final digest = Argon2(
+      salt: saltBytes,
+      type: Argon2Type.argon2id,
+      hashLength: 32,
+      iterations: 3,
+      parallelism: 1,
+      memorySizeKB: 32768,
+    ).convert(utf8.encode(pwd));
+    return digest.hex();
+  }
+
+  List<(String, String)> _unsaltedCandidates(String pwd) {
+    final md5Pwd = _md5Hex(utf8.encode(pwd));
+    final sha256Bytes = _sha256Bytes(utf8.encode(pwd));
+    return [
+      ('sha256_v3', '$md5Pwd.${base64.encode(sha256Bytes)}'),
+      ('sha256_hex_v3', _hex(sha256Bytes)),
+    ];
+  }
+
+  Future<(String?, String)> _tryV3Profile(String profileName) async {
+    final p = _profiles[profileName]!;
+    final headers = _buildHeaders(profileName);
+    final preResp = await _postJson(
+        '${p.baseUrl}/iam/pub/3/auth/pre-insp', {'u': username}, headers);
+    if (!_isOk(preResp)) {
+      return (null, 'pre-insp échoué: ${preResp['message']}');
+    }
+    final preData = (preResp['data'] as Map?)?.cast<String, dynamic>() ?? {};
+    final saltB64 = preData['a'] as String?;
+    final nonce   = preData['n'];
+
+    final candidates = <(String, String)>[];
+    if (saltB64 != null && saltB64.isNotEmpty) {
+      candidates.add(('argon2_v3', _argon2Hash(password, saltB64)));
+    } else {
+      candidates.addAll(_unsaltedCandidates(password));
+    }
+
+    for (final c in candidates) {
+      final loginResp = await _postJson('${p.baseUrl}/iam/pub/3/auth/login',
+          {'u': username, 'ch': c.$2, 'n': nonce}, headers);
+      if (_isOk(loginResp)) {
+        final token = (loginResp['data'] as Map?)?['token'] as String?;
+        if (token != null) return (token, c.$1);
+      }
+    }
+    return (null, 'toutes les variantes ont échoué pour $profileName');
+  }
+
+  Future<String?> _tryLegacyV0() async {
+    final headers = _buildHeaders('web');
+    final md5Pwd = _md5Hex(utf8.encode(password));
+    final resp = await _postJson('$baseUrl/iam/pub/0/auth/login',
+        {'user_name': username, 'password': md5Pwd}, headers);
+    if (_isOk(resp)) return (resp['data'] as Map?)?['token'] as String?;
+    return null;
+  }
+
+  Future<void> login() async {
+    final failures = <String>[];
+    for (final profileName in ['web', 'installer', 'home']) {
+      final r = await _tryV3Profile(profileName);
+      if (r.$1 != null) {
+        _token = r.$1;
+        _workingProfile = profileName;
+        return;
+      }
+      failures.add('$profileName: ${r.$2}');
+    }
+    final legacyToken = await _tryLegacyV0();
+    if (legacyToken != null) {
+      _token = legacyToken;
+      _workingProfile = 'web'; // legacy réutilise les headers "web" pour la suite
+      return;
+    }
+    throw Exception('Authentification Hoymiles échouée (${failures.join(" / ")})');
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchStationsRaw() async {
+    if (_token == null) await login();
+    final headers = _buildHeaders(_workingProfile!, withToken: true);
+    final stations = <Map<String, dynamic>>[];
+    var pageNum = 1;
+    while (true) {
+      final resp = await _postJson('$baseUrl/pvm/api/0/station/select_by_page',
+          {'page_size': 100, 'page_num': pageNum}, headers);
+      if (!_isOk(resp)) break;
+      final data = (resp['data'] as Map?)?.cast<String, dynamic>() ?? {};
+      final pageList = (data['list'] as List?) ?? const [];
+      if (pageList.isEmpty) break;
+      stations.addAll(pageList.cast<Map<String, dynamic>>());
+      final total = data['total'] as int?;
+      if (total == null || stations.length >= total) break;
+      pageNum++;
+    }
+    return stations;
+  }
+
+  Future<Map<String, dynamic>?> _fetchRealTimeData(String stationId) async {
+    final headers = _buildHeaders(_workingProfile!, withToken: true);
+    final sidNum = int.tryParse(stationId);
+    final resp = await _postJson(
+        '$baseUrl/pvm-data/api/0/station/data/count_station_real_data',
+        {'sid': sidNum ?? stationId}, headers);
+    return _isOk(resp) ? (resp['data'] as Map?)?.cast<String, dynamic>() : null;
+  }
+
+  // Wh (string API) → kWh numérique, pour cohérence avec les autres fournisseurs
+  static double? _whToKwh(dynamic v) {
+    final d = asDouble(v);
+    return d != null ? d / 1000 : null;
+  }
+
+  Future<List<HoymilesStation>> fetchAllStations() async {
+    final rawStations = await _fetchStationsRaw();
+    final result = <HoymilesStation>[];
+    for (final raw in rawStations) {
+      final id = (raw['id'] ?? raw['sid'] ?? raw['station_id'])?.toString();
+      if (id == null) continue;
+      final name = (raw['name'] as String?) ?? id;
+      final realtime = await _fetchRealTimeData(id);
+      result.add(HoymilesStation(
+        id: id, name: name,
+        powerW:    asDouble(realtime?['real_power']),
+        todayKwh:  _whToKwh(realtime?['today_eq']),
+        monthKwh:  _whToKwh(realtime?['month_eq']),
+        yearKwh:   _whToKwh(realtime?['year_eq']),
+        totalKwh:  _whToKwh(realtime?['total_eq']),
+        lastDataTime: (realtime?['data_time'] ?? realtime?['last_data_time'])?.toString(),
+      ));
+    }
+    return result;
+  }
+}
+
 // ── Config et état par ESP32 ───────────────────────────────────────────────────
 class EspConfig {
   final String name;
@@ -1028,6 +1336,8 @@ class _HomeScreenState extends State<HomeScreen> {
   IzypowerClient?  _izyClient;
   SunologyClient?  _sunoClient;
   ApSystemsClient? _apClient;
+  HoymilesClient?  _hoyClient;
+  DateTime? _lastHoymilesRefresh; // pour imposer le rate-limit strict de 15mn
   bool _solarRefreshInProgress = false; // évite les cycles qui se chevauchent
   Timer? _solarTimer;
   Timer? _izyLiveModeTimer;
@@ -1244,10 +1554,15 @@ class _HomeScreenState extends State<HomeScreen> {
         _solarConfig.apsystemsUsername.isNotEmpty)
         ? ApSystemsClient(username: _solarConfig.apsystemsUsername, password: _solarConfig.apsystemsPassword)
         : null;
+    _hoyClient = (_solarConfig.enabled && _solarConfig.hoymilesEnabled &&
+        _solarConfig.hoymilesUsername.isNotEmpty)
+        ? HoymilesClient(username: _solarConfig.hoymilesUsername, password: _solarConfig.hoymilesPassword)
+        : null;
   }
 
   bool get _solarTabEnabled => _solarConfig.enabled &&
-      (_solarConfig.izypowerEnabled || _solarConfig.sunologyEnabled || _solarConfig.apsystemsEnabled);
+      (_solarConfig.izypowerEnabled || _solarConfig.sunologyEnabled ||
+          _solarConfig.apsystemsEnabled || _solarConfig.hoymilesEnabled);
 
   int get _totalPages =>
       (_displayMode == 'single' ? 1 : _espConfigs.length) + (_solarTabEnabled ? 1 : 0);
@@ -1438,6 +1753,31 @@ class _HomeScreenState extends State<HomeScreen> {
           if (mounted) setState(() => _solarState = _solarState.copyWith(apsystemsOk: false, apsystemsStatus: short));
         }
       }
+      // Hoymiles S-Miles Cloud — rate-limit STRICT : jamais plus souvent que
+      // toutes les 15mn, sous peine de bannissement temporaire de l'API (constat
+      // communautaire, non documenté officiellement). On saute silencieusement
+      // le cycle si l'intervalle minimum n'est pas encore écoulé.
+      if (_hoyClient != null) {
+        final now = DateTime.now();
+        final tooSoon = _lastHoymilesRefresh != null &&
+            now.difference(_lastHoymilesRefresh!) < const Duration(minutes: 15);
+        if (!tooSoon) {
+          _lastHoymilesRefresh = now;
+          try {
+            final stations = await _hoyClient!.fetchAllStations();
+            if (mounted) setState(() {
+              _solarState = _solarState.copyWith(
+                hoymilesStations: stations,
+                hoymilesOk: true, hoymilesStatus: TimeOfDay.now().format(context),
+              );
+            });
+          } catch (e) {
+            final msg = e.toString().replaceFirst('Exception: ', '');
+            final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
+            if (mounted) setState(() => _solarState = _solarState.copyWith(hoymilesOk: false, hoymilesStatus: short));
+          }
+        }
+      }
     } finally {
       _solarRefreshInProgress = false;
     }
@@ -1487,6 +1827,13 @@ class _HomeScreenState extends State<HomeScreen> {
       for (var i = 0; i < _espConfigs.length; i++) _fetchCapteursInfo(i);
       _refreshAll();
       _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshAll());
+
+      // Suivi solaire en tâche de fond (même sans être sur sa page) pour
+      // pouvoir afficher la production PV totale sous le bloc Forçage.
+      if (_solarTabEnabled) {
+        _refreshSolar();
+        _solarTimer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshSolar());
+      }
     } else {
       // Mode multi-pages : poll seulement l'ESP visible
       _fetchCapteursInfo(_currentPage);
@@ -2116,11 +2463,38 @@ class _HomeScreenState extends State<HomeScreen> {
     return Column(mainAxisSize: MainAxisSize.min, children: sections);
   }
 
+  // Petit bloc résumé (valeur seule) affiché en mode monopage sous le
+  // Forçage, quand le suivi solaire est activé mais que sa page n'est pas
+  // affichée — nécessite un polling solaire en tâche de fond (voir _startPolling).
+  Widget _buildSolarSummaryBlock() {
+    if (!_solarTabEnabled) return const SizedBox.shrink();
+    final hasValue = _solarHasAnyValue;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(children: [
+        Icon(Icons.wb_sunny_outlined, color: const Color(0xFFFACC15), size: 20),
+        const SizedBox(width: 10),
+        Text('PROD. PV SOLAIRE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+            letterSpacing: 1.2, color: appLabelColor)),
+        const Spacer(),
+        Text(hasValue ? '${_solarTotalPvW.round()} W' : '--',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 18,
+                fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+      ]),
+    );
+  }
+
   Widget _buildSinglePageView() {
     final combined = _buildCombinedModules();
     final sel      = _getSingleSelected();
     final multiMod = combined.length > 1;
-    final forcage  = sel?.module.forcage ?? 0;
+    final forcage  = sel?.module.forcage
+        ?? (!multiMod && combined.isNotEmpty ? combined.first.forcage : 0);
     final statusOk = _espStates.any((s) => s.ok);
     final statusTxt = statusOk
         ? 'màj ${TimeOfDay.now().format(context)}'
@@ -2225,6 +2599,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 12),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: forceW),
+                if (_solarTabEnabled) ...[
+                  const SizedBox(height: 12),
+                  Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: _buildSolarSummaryBlock()),
+                ],
                 const SizedBox(height: 12),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: status),
                 const SizedBox(height: 16),
@@ -2276,6 +2655,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
                   const SizedBox(height: 12),
                   forceW,
+                  if (_solarTabEnabled) ...[
+                    const SizedBox(height: 12),
+                    _buildSolarSummaryBlock(),
+                  ],
                   const SizedBox(height: 12),
                   status,
                 ],
@@ -2356,15 +2739,29 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // ── Page suivi solaire (Izypower / Sunology) ────────────────────────────────
-  Widget _buildSolarPage(BuildContext context) {
+  // Production PV totale (W), toutes sources solaires activées confondues —
+  // réutilisé à la fois par la page solaire et le bloc résumé en mode monopage.
+  double get _solarTotalPvW {
     final s = _solarState;
     final apTotalPv = s.apsystemsInverters
         .fold<double>(0, (sum, inv) => sum + (inv.powerW ?? 0));
-    final totalPv = (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv;
+    final hoyTotalPv = s.hoymilesStations
+        .fold<double>(0, (sum, st) => sum + (st.powerW ?? 0));
+    return (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv + hoyTotalPv;
+  }
+
+  bool get _solarHasAnyValue =>
+      _solarState.izyOk || _solarState.sunologyOk ||
+          _solarState.apsystemsOk || _solarState.hoymilesOk;
+
+  // ── Page suivi solaire (Izypower / Sunology) ────────────────────────────────
+  Widget _buildSolarPage(BuildContext context) {
+    final s = _solarState;
+    final totalPv = _solarTotalPvW;
     final hasIzy  = _solarConfig.izypowerEnabled;
     final hasSuno = _solarConfig.sunologyEnabled;
     final hasAp   = _solarConfig.apsystemsEnabled;
+    final hasHoy  = _solarConfig.hoymilesEnabled;
 
     // Total journalier cumulé (kWh) toutes sources activées confondues.
     // Sunology stocke sa valeur "Jour" en texte déjà formaté par l'API
@@ -2390,6 +2787,14 @@ class _HomeScreenState extends State<HomeScreen> {
           .fold<double>(0, (sum, i) => sum + i.todayEnergyKwh!);
       if (s.apsystemsInverters.any((i) => i.todayEnergyKwh != null)) {
         dailyTotalKwh = (dailyTotalKwh ?? 0) + apDaily;
+      }
+    }
+    if (hasHoy) {
+      final hoyDaily = s.hoymilesStations
+          .where((st) => st.todayKwh != null)
+          .fold<double>(0, (sum, st) => sum + st.todayKwh!);
+      if (s.hoymilesStations.any((st) => st.todayKwh != null)) {
+        dailyTotalKwh = (dailyTotalKwh ?? 0) + hoyDaily;
       }
     }
 
@@ -2680,6 +3085,65 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
               }),
             ],
+        ],
+
+        // ── Section Hoymiles S-Miles Cloud (un bloc par centrale) ──────────────
+        if (hasHoy) ...[
+          _solarSectionHeader('HOYMILES', const Color(0xFFA855F7), s.hoymilesOk, s.hoymilesStatus),
+          const SizedBox(height: 10),
+          if (s.hoymilesStations.isEmpty)
+            Text('Aucune centrale trouvée', style: TextStyle(fontSize: 12, color: appLabelColor))
+          else
+            for (var i = 0; i < s.hoymilesStations.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              Builder(builder: (_) {
+                final st = s.hoymilesStations[i];
+                String? kwh(double? v) => v != null ? '${v.toStringAsFixed(2)} kWh' : null;
+                return Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D1420),
+                    border: Border.all(color: Colors.white.withOpacity(0.06)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(st.name.toUpperCase(),
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                            letterSpacing: 1.2, color: appLabelColor)),
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Icon(Icons.solar_power_outlined, color: const Color(0xFFFACC15), size: 20),
+                      const SizedBox(width: 8),
+                      Text(st.powerW != null ? '${st.powerW!.round()} W' : '--',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 20,
+                              fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+                    ]),
+                    const SizedBox(height: 10),
+                    IntrinsicHeight(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Expanded(child: _solarMiniStat('Jour', kwh(st.todayKwh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Mois', kwh(st.monthKwh))),
+                      ]),
+                    ),
+                    const SizedBox(height: 8),
+                    IntrinsicHeight(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Expanded(child: _solarMiniStat('Année', kwh(st.yearKwh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Total', kwh(st.totalKwh))),
+                      ]),
+                    ),
+                    if (st.lastDataTime != null) ...[
+                      const SizedBox(height: 8),
+                      Text('Dernière mesure : ${st.lastDataTime}',
+                          style: TextStyle(fontSize: 10, color: appLabelColor)),
+                    ],
+                  ]),
+                );
+              }),
+            ],
+          const SizedBox(height: 20),
         ],
       ]),
     );
@@ -3791,12 +4255,13 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
   // ── Suivi solaire ────────────────────────────────────────────────────────
   late bool _solarEnabled;
-  late bool _sunologyEnabled, _izypowerEnabled, _apsystemsEnabled;
+  late bool _sunologyEnabled, _izypowerEnabled, _apsystemsEnabled, _hoymilesEnabled;
   late TextEditingController _sunoEmailCtrl, _sunoPwdCtrl;
   late TextEditingController _izyEmailCtrl, _izyPwdCtrl, _izyStationCtrl, _izyBatterySnCtrl;
   late TextEditingController _apUserCtrl, _apPwdCtrl;
+  late TextEditingController _hoyUserCtrl, _hoyPwdCtrl;
   late TextEditingController _totalCapacityCtrl;
-  bool _sunoTesting = false, _izyTesting = false, _apTesting = false;
+  bool _sunoTesting = false, _izyTesting = false, _apTesting = false, _hoyTesting = false;
   bool _izyDiscovering = false;
   String? _izyDiscoverError;
   bool _izyBattDiscovering = false;
@@ -3804,7 +4269,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
   String? _sunoTestResult; // null=non testé, sinon message
   String? _izyTestResult;
   String? _apTestResult;
-  bool _sunoTestOk = false, _izyTestOk = false, _apTestOk = false;
+  String? _hoyTestResult;
+  bool _sunoTestOk = false, _izyTestOk = false, _apTestOk = false, _hoyTestOk = false;
   // Liste des onduleurs découverts au test, dans l'ordre choisi par l'utilisateur
   // (devId + nom) — réordonnable avec les boutons haut/bas.
   List<({String devId, String name})>? _apDiscoveredInverters;
@@ -3828,6 +4294,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _sunologyEnabled  = sc.sunologyEnabled;
     _izypowerEnabled  = sc.izypowerEnabled;
     _apsystemsEnabled = sc.apsystemsEnabled;
+    _hoymilesEnabled  = sc.hoymilesEnabled;
     _sunoEmailCtrl    = TextEditingController(text: sc.sunologyEmail);
     _sunoPwdCtrl      = TextEditingController(text: sc.sunologyPassword);
     _izyEmailCtrl     = TextEditingController(text: sc.izypowerEmail);
@@ -3836,6 +4303,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _izyBatterySnCtrl = TextEditingController(text: sc.izypowerBatterySn);
     _apUserCtrl       = TextEditingController(text: sc.apsystemsUsername);
     _apPwdCtrl        = TextEditingController(text: sc.apsystemsPassword);
+    _hoyUserCtrl      = TextEditingController(text: sc.hoymilesUsername);
+    _hoyPwdCtrl       = TextEditingController(text: sc.hoymilesPassword);
     _totalCapacityCtrl = TextEditingController(
         text: sc.totalCapacityW > 0 ? sc.totalCapacityW.round().toString() : '');
     _ctrls = widget.currentConfigs.map((c) => {
@@ -3868,6 +4337,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _izyEmailCtrl.dispose();  _izyPwdCtrl.dispose(); _izyStationCtrl.dispose();
     _izyBatterySnCtrl.dispose();
     _apUserCtrl.dispose(); _apPwdCtrl.dispose();
+    _hoyUserCtrl.dispose(); _hoyPwdCtrl.dispose();
     _totalCapacityCtrl.dispose();
     super.dispose();
   }
@@ -4087,6 +4557,28 @@ class _ConfigSheetState extends State<ConfigSheet> {
         _apTestOk = false;
         _apTestResult = 'Échec : Kontoname (pas email) ou mot de passe invalide ?';
         _apTesting = false;
+      });
+    }
+  }
+
+  Future<void> _testHoymiles() async {
+    setState(() { _hoyTesting = true; _hoyTestResult = null; });
+    try {
+      final client = HoymilesClient(username: _hoyUserCtrl.text.trim(), password: _hoyPwdCtrl.text);
+      final stations = await client.fetchAllStations();
+      setState(() {
+        _hoyTestOk = true;
+        _hoyTestResult = stations.isEmpty
+            ? 'Connecté (aucune centrale trouvée)'
+            : 'Connecté · ${stations.length} centrale(s)';
+        _hoyTesting = false;
+      });
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _hoyTestOk = false;
+        _hoyTestResult = 'Échec : $msg';
+        _hoyTesting = false;
       });
     }
   }
@@ -4724,6 +5216,73 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     ),
                 ],
               ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // Hoymiles S-Miles Cloud
+              CheckboxListTile(
+                value: _hoymilesEnabled,
+                onChanged: (v) => setState(() => _hoymilesEnabled = v!),
+                title: const Text('Hoymiles (S-Miles Cloud)',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                subtitle: const Text('Rafraîchi toutes les 15 min (limite imposée par l\'API)',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                activeColor: const Color(0xFFA855F7),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_hoymilesEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _hoyUserCtrl,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Identifiant Hoymiles'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _hoyPwdCtrl,
+                  obscureText: true,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Mot de passe'),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _hoyTesting ? null : _testHoymiles,
+                    icon: _hoyTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFA855F7)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFFA855F7)),
+                    label: Text(_hoyTesting ? 'Test en cours… (peut prendre quelques secondes)' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFFA855F7))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFA855F7), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_hoyTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _hoyTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_hoyTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_hoyTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _hoyTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_hoyTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _hoyTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+              ],
             ],
             const SizedBox(height: 16),
 
@@ -4835,6 +5394,9 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     apsystemsOrder: _apDiscoveredInverters != null
                         ? _apDiscoveredInverters!.map((i) => i.devId).toList()
                         : widget.currentSolarConfig.apsystemsOrder,
+                    hoymilesEnabled: _hoymilesEnabled,
+                    hoymilesUsername: _hoyUserCtrl.text.trim(),
+                    hoymilesPassword: _hoyPwdCtrl.text,
                     totalCapacityW: double.tryParse(_totalCapacityCtrl.text.trim()) ?? 0,
                   );
                   await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor, solarConfig);
@@ -5445,6 +6007,7 @@ class _ChartsPageState extends State<ChartsPage>
           lineTouchData: LineTouchData(touchTooltipData: LineTouchTooltipData(
               fitInsideVertically: true,
               fitInsideHorizontally: true,
+              getTooltipColor: (_) => const Color(0xFF111827).withOpacity(0.82),
               getTooltipItems: (spots) => spots.map((s) {
                 final ts = timestampFor(s.x);
                 return LineTooltipItem(

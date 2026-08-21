@@ -1,7 +1,7 @@
 name: chauffe_eau
 description: Widget chauffe-eau ESP32 F1ATB
 publish_to: 'none'
-version: 4.7.5+106
+version: 4.8.1+111
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -14,6 +14,7 @@ dependencies:
   fl_chart: ^0.68.0
   pointycastle: ^3.9.1
   basic_utils: ^5.7.0
+  hashlib: ^1.19.0
 
 dev_dependencies:
   flutter_test:
