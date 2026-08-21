@@ -60,6 +60,12 @@ v4.7.4 - Correction positionnement des affichages
 
 v4.7.5 - Ajout du cumul production journalière sous la jauge
 
+v4.7.6 - Report production live du suivi solaire sur Page 1 en Monopage
+
+v4.7.7 - Correction Bug Forçage
+
+v4.8.1 - Intégration Hoymiles S-Miles Cloud (auth multi-profils Argon2id) + transparence infobulle graphique
+
 
 --------
 
