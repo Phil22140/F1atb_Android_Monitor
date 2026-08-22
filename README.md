@@ -66,6 +66,8 @@ v4.7.7 - Correction Bug Forçage
 
 v4.8.1 - Intégration Hoymiles S-Miles Cloud (auth multi-profils Argon2id) + transparence infobulle graphique
 
+v4.8.2 - Transparence infobulles graphiques 1an, axe Y fixe sur le graphique 1 an
+
 
 --------
 
