@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.8.1';
+const String appVersion = '4.8.2';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -6050,11 +6050,9 @@ class _ChartsPageState extends State<ChartsPage>
       ),
       borderData: FlBorderData(show: false),
       titlesData: FlTitlesData(
-        leftTitles: AxisTitles(sideTitles: SideTitles(
-          showTitles: true, reservedSize: 44,
-          getTitlesWidget: (v, _) => Text('${(v/1000).toStringAsFixed(1)}k',
-              style: TextStyle(fontSize: 9, color: appLabelColor)),
-        )),
+        // Axe Y masqué ici : rendu séparément dans une colonne fixe qui ne
+        // scrolle pas, pour rester visible même en glissant le graphique.
+        leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false, reservedSize: 0)),
         rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
         topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
         bottomTitles: AxisTitles(sideTitles: SideTitles(
@@ -6094,6 +6092,7 @@ class _ChartsPageState extends State<ChartsPage>
         touchTooltipData: BarTouchTooltipData(
           fitInsideVertically: true,
           fitInsideHorizontally: true,
+          getTooltipColor: (_) => const Color(0xFF111827).withOpacity(0.82),
           getTooltipItem: (group, _, rod, rodIndex) {
             final e      = entries[group.x];
             final label  = labelDate(e.date);
@@ -6142,13 +6141,44 @@ class _ChartsPageState extends State<ChartsPage>
           Text('Wh injecte', style: TextStyle(fontSize: 10, color: appLabelColor)),
         ]),
         const SizedBox(height: 10),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: SizedBox(
-            width: max(chartWidth, 300),
-            height: 150,
-            child: chart,
-          ),
+        SizedBox(
+          height: 150,
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            // Axe Y fixe (ne scrolle pas avec les barres) — mêmes maxY/minY
+            // que le graphique principal pour un alignement parfait.
+            SizedBox(
+              width: 44,
+              height: 150,
+              child: BarChart(BarChartData(
+                maxY:  maxY,
+                minY: -maxY * 0.3,
+                gridData: const FlGridData(show: false),
+                borderData: FlBorderData(show: false),
+                barTouchData: BarTouchData(enabled: false),
+                barGroups: const [],
+                titlesData: FlTitlesData(
+                  leftTitles: AxisTitles(sideTitles: SideTitles(
+                    showTitles: true, reservedSize: 44,
+                    getTitlesWidget: (v, _) => Text('${(v/1000).toStringAsFixed(1)}k',
+                        style: TextStyle(fontSize: 9, color: appLabelColor)),
+                  )),
+                  rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                ),
+              )),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SizedBox(
+                  width: max(chartWidth, 300),
+                  height: 150,
+                  child: chart,
+                ),
+              ),
+            ),
+          ]),
         ),
       ]),
     );
