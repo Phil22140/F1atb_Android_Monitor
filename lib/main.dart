@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.8.2';
+const String appVersion = '4.8.6';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -90,6 +90,24 @@ Map<String, double> parsePuissances(String body) {
     pwiT = g2.length > 1 ? (double.tryParse(g2[1].trim()) ?? 0.0) : 0.0;
   }
   return {'pws': pws, 'pwi': pwi, 'pwsT': pwsT, 'pwiT': pwiT};
+}
+
+// Énergie Wh jour/totale — disponible seulement si un compteur avec relevé
+// cumulé est connecté (ex: Shelly Gen1 EM en 2e sonde). Découvert via MainJS :
+// elementsMaison = ['PwS_M','PwI_M','PVAS_M','PVAI_M','EAJS_M','EAJI_M',
+// 'EAS_M','EAI_M'] mappé sur G1[0..7] — les 4 premiers (puissances) sont déjà
+// gérés par parsePuissances ci-dessus, ceci complète avec les 4 derniers.
+Map<String, double?> parseEnergieJour(String body) {
+  final groupes = body.split(GS);
+  if (groupes.length < 2) return const {};
+  final g1 = groupes[1].split(RS);
+  double? at(int i) => g1.length > i ? double.tryParse(g1[i].trim()) : null;
+  return {
+    'whJourSoutire': at(4),
+    'whJourInjecte': at(5),
+    'whTotalSoutire': at(6),
+    'whTotalInjecte': at(7),
+  };
 }
 
 // ── Parsing Tempo RTE (couleur tarifaire) ─────────────────────────────────────
@@ -262,6 +280,10 @@ class SolarConfig {
   final bool hoymilesEnabled;
   final String hoymilesUsername;
   final String hoymilesPassword;
+  final bool openDtuEnabled;
+  final String openDtuMode;      // 'direct' ou 'router'
+  final String openDtuDirectUrl; // mode direct : URL de base OpenDTU
+  final String openDtuRouterEspName; // mode routeur : nom de l'ESP F1ATB relais
   final double totalCapacityW; // puissance crête installée totale (W), pour calibrer la jauge
   const SolarConfig({
     this.enabled = false,
@@ -280,6 +302,10 @@ class SolarConfig {
     this.hoymilesEnabled = false,
     this.hoymilesUsername = '',
     this.hoymilesPassword = '',
+    this.openDtuEnabled = false,
+    this.openDtuMode = 'direct',
+    this.openDtuDirectUrl = '',
+    this.openDtuRouterEspName = '',
     this.totalCapacityW = 0,
   });
 
@@ -289,6 +315,7 @@ class SolarConfig {
     String? izypowerBatterySn, bool? apsystemsEnabled, String? apsystemsUsername,
     String? apsystemsPassword, List<String>? apsystemsOrder,
     bool? hoymilesEnabled, String? hoymilesUsername, String? hoymilesPassword,
+    bool? openDtuEnabled, String? openDtuMode, String? openDtuDirectUrl, String? openDtuRouterEspName,
     double? totalCapacityW,
   }) {
     return SolarConfig(
@@ -308,6 +335,10 @@ class SolarConfig {
       hoymilesEnabled: hoymilesEnabled ?? this.hoymilesEnabled,
       hoymilesUsername: hoymilesUsername ?? this.hoymilesUsername,
       hoymilesPassword: hoymilesPassword ?? this.hoymilesPassword,
+      openDtuEnabled: openDtuEnabled ?? this.openDtuEnabled,
+      openDtuMode: openDtuMode ?? this.openDtuMode,
+      openDtuDirectUrl: openDtuDirectUrl ?? this.openDtuDirectUrl,
+      openDtuRouterEspName: openDtuRouterEspName ?? this.openDtuRouterEspName,
       totalCapacityW: totalCapacityW ?? this.totalCapacityW,
     );
   }
@@ -329,6 +360,10 @@ class SolarConfig {
     'hoymiles_enabled': hoymilesEnabled,
     'hoymiles_username': hoymilesUsername,
     'hoymiles_password': hoymilesPassword,
+    'opendtu_enabled': openDtuEnabled,
+    'opendtu_mode': openDtuMode,
+    'opendtu_direct_url': openDtuDirectUrl,
+    'opendtu_router_esp_name': openDtuRouterEspName,
     'total_capacity_w': totalCapacityW,
   };
 
@@ -349,6 +384,10 @@ class SolarConfig {
     hoymilesEnabled: j['hoymiles_enabled'] as bool? ?? false,
     hoymilesUsername: j['hoymiles_username'] as String? ?? '',
     hoymilesPassword: j['hoymiles_password'] as String? ?? '',
+    openDtuEnabled: j['opendtu_enabled'] as bool? ?? false,
+    openDtuMode: j['opendtu_mode'] as String? ?? 'direct',
+    openDtuDirectUrl: j['opendtu_direct_url'] as String? ?? '',
+    openDtuRouterEspName: j['opendtu_router_esp_name'] as String? ?? '',
     totalCapacityW: (j['total_capacity_w'] as num?)?.toDouble() ?? 0,
   );
 }
@@ -382,6 +421,10 @@ class SolarState {
   final List<HoymilesStation> hoymilesStations;
   final bool hoymilesOk;
   final String hoymilesStatus;
+  // Hoymiles via OpenDTU (local, relais routeur ou URL directe)
+  final List<OpenDtuInverter> openDtuInverters;
+  final bool openDtuOk;
+  final String openDtuStatus;
 
   const SolarState({
     this.sunologyPvW, this.sunologyDayTxt, this.sunologyWeekTxt,
@@ -399,6 +442,8 @@ class SolarState {
     this.apsystemsOk = false, this.apsystemsStatus = 'connexion…',
     this.hoymilesStations = const [],
     this.hoymilesOk = false, this.hoymilesStatus = 'connexion…',
+    this.openDtuInverters = const [],
+    this.openDtuOk = false, this.openDtuStatus = 'connexion…',
   });
 
   SolarState copyWith({
@@ -417,6 +462,8 @@ class SolarState {
     bool? apsystemsOk, String? apsystemsStatus,
     List<HoymilesStation>? hoymilesStations,
     bool? hoymilesOk, String? hoymilesStatus,
+    List<OpenDtuInverter>? openDtuInverters,
+    bool? openDtuOk, String? openDtuStatus,
   }) {
     return SolarState(
       sunologyPvW: sunologyPvW ?? this.sunologyPvW,
@@ -454,6 +501,9 @@ class SolarState {
       hoymilesStations: hoymilesStations ?? this.hoymilesStations,
       hoymilesOk: hoymilesOk ?? this.hoymilesOk,
       hoymilesStatus: hoymilesStatus ?? this.hoymilesStatus,
+      openDtuInverters: openDtuInverters ?? this.openDtuInverters,
+      openDtuOk: openDtuOk ?? this.openDtuOk,
+      openDtuStatus: openDtuStatus ?? this.openDtuStatus,
     );
   }
 }
@@ -1213,6 +1263,122 @@ class HoymilesClient {
   }
 }
 
+// ── Client Hoymiles via OpenDTU ─────────────────────────────────────────────────
+// Contrairement au S-Miles Cloud (auth complexe, rate-limit 15mn), OpenDTU est un
+// firmware DTU de remplacement 100% local — pas de compte, pas de cloud, lecture
+// libre. Deux modes de connexion :
+//  - "direct"  : URL fournie par l'utilisateur pointant directement vers OpenDTU
+//                (IP locale si même réseau que le téléphone, ou URL distante si la
+//                personne a monté son propre accès — VPN, DDNS, port forwarding…).
+//                Entièrement fonctionnel, format confirmé par la doc officielle.
+//  - "router"  : relais via un routeur F1ATB déjà configuré, dont le firmware a été
+//                étendu pour parler à OpenDTU sur son réseau local et relayer les
+//                données via le canal F1ATB déjà accessible à distance. Endpoint
+//                exact PAS ENCORE CONFIRMÉ — stub qui échoue proprement en
+//                attendant, pour ne pas faire croire à une fonctionnalité qui
+//                n'existe pas encore côté firmware routeur.
+
+class OpenDtuInverter {
+  final String serial;
+  final String name;
+  final bool reachable, producing;
+  final double? powerW;
+  final double? yieldDayWh;   // Wh (pas de conversion, cohérent avec la doc OpenDTU)
+  final double? yieldTotalKwh;
+  final int? dataAgeMs; // fraîcheur de la dernière donnée reçue de l'onduleur (ms)
+  const OpenDtuInverter({
+    required this.serial, required this.name,
+    this.reachable = false, this.producing = false,
+    this.powerW, this.yieldDayWh, this.yieldTotalKwh, this.dataAgeMs,
+  });
+}
+
+class HoymilesOpenDtuClient {
+  final String mode; // 'direct' ou 'router'
+  final String directUrl;   // mode direct : URL de base OpenDTU (ex: http://192.168.1.50)
+  final String? routerUrl;  // mode routeur : URL du routeur F1ATB relais (EspConfig.url)
+
+  HoymilesOpenDtuClient({required this.mode, this.directUrl = '', this.routerUrl});
+
+  Future<Map<String, dynamic>> _getJson(String url) async {
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final text = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode != 200) {
+        throw Exception('OpenDTU erreur ${resp.statusCode}');
+      }
+      return jsonDecode(text) as Map<String, dynamic>;
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<List<OpenDtuInverter>> fetchInverters() async {
+    // Le routeur F1ATB a été étendu pour reconnaître directement les chemins
+    // OpenDTU natifs (/api/livedata/status...) et relayer en interne vers
+    // OpenDTU sur son LAN — donc côté client, mode "router" et mode "direct"
+    // sont identiques : seule la base URL change (routeur au lieu d'OpenDTU).
+    final base = (mode == 'router' ? (routerUrl ?? '') : directUrl).trim();
+    if (base.isEmpty) {
+      throw Exception(mode == 'router'
+          ? 'Aucun routeur F1ATB sélectionné'
+          : 'URL OpenDTU non renseignée');
+    }
+    final normalizedBase = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+
+    // Endpoint global : liste des onduleurs (identité + état de communication,
+    // MAIS PAS la puissance/production — ces valeurs sont dans le détail par
+    // onduleur ci-dessous, ou dans l'agrégat "total" si un seul onduleur suffit).
+    final json = await _getJson('$normalizedBase/api/livedata/status');
+    final invList = (json['inverters'] as List?) ?? const [];
+
+    final result = <OpenDtuInverter>[];
+    for (final raw in invList) {
+      final inv = raw as Map<String, dynamic>;
+      final serial = (inv['serial'] ?? '').toString();
+      if (serial.isEmpty) continue;
+      final name = (inv['name'] as String?) ?? serial;
+      final reachable = inv['reachable'] as bool? ?? false;
+      final producing = inv['producing'] as bool? ?? false;
+      // "data_age_ms" (précis, en ms) prioritaire sur "data_age" (confirmé en
+      // secondes par un exemple réel : data_age=12 / data_age_ms=12035).
+      final dataAgeMs = (inv['data_age_ms'] as num?)?.toInt()
+          ?? (((inv['data_age'] as num?)?.toInt() ?? 0) * 1000);
+
+      // Détail par onduleur : /api/livedata/status?inv=<serial> renvoie la
+      // MÊME structure "inverters": [...] mais filtrée à cet onduleur — avec
+      // en plus les objets AC/DC/INV imbriqués DANS l'entrée de l'onduleur
+      // elle-même (pas des clés plates "AC.0"/"INV.0" comme supposé au départ ;
+      // confirmé par un exemple réel du contact).
+      double? powerW, yieldDayWh, yieldTotalKwh;
+      try {
+        final detailJson = await _getJson('$normalizedBase/api/livedata/status?inv=$serial');
+        final detailList = (detailJson['inverters'] as List?) ?? const [];
+        if (detailList.isNotEmpty) {
+          final detailInv = detailList.first as Map<String, dynamic>;
+          double? numOf(Map<String, dynamic>? obj, String key) => asDouble(obj?[key]?['v']);
+          final ac0  = (detailInv['AC']  as Map?)?['0'] as Map<String, dynamic>?;
+          final inv0 = (detailInv['INV'] as Map?)?['0'] as Map<String, dynamic>?;
+          powerW        = numOf(ac0, 'Power');
+          yieldDayWh    = numOf(inv0, 'YieldDay');
+          yieldTotalKwh = numOf(inv0, 'YieldTotal');
+        }
+      } catch (_) {
+        // Échec du détail : on garde quand même l'identité/état de base
+      }
+
+      result.add(OpenDtuInverter(
+        serial: serial, name: name, reachable: reachable, producing: producing,
+        powerW: powerW, yieldDayWh: yieldDayWh, yieldTotalKwh: yieldTotalKwh,
+        dataAgeMs: dataAgeMs,
+      ));
+    }
+    return result;
+  }
+}
+
 // ── Config et état par ESP32 ───────────────────────────────────────────────────
 class EspConfig {
   final String name;
@@ -1220,12 +1386,14 @@ class EspConfig {
   final String password;
   final List<int>? enabledNumActions;   // null=tout afficher, []=aucune, [0,1]=filtrés
   final List<int>? enabledTempIndices;  // null=tout afficher, []=aucun, [0,2]=filtrés
+  final String phaseMode; // 'mono' ou 'tri' — réseau monophasé ou triphasé
   const EspConfig({
     required this.name,
     required this.url,
     required this.password,
     this.enabledNumActions,
     this.enabledTempIndices,
+    this.phaseMode = 'mono',
   });
 }
 
@@ -1238,6 +1406,10 @@ class EspState {
   final double pwi;
   final double pwsT;   // puissance soutiree sonde fixe (Triac)
   final double pwiT;   // puissance injectee sonde fixe (Triac)
+  final double? whJourSoutire;  // Wh du jour, dispo si compteur cumulé (ex: Shelly EM)
+  final double? whJourInjecte;
+  final double? whTotalSoutire; // Wh cumul total depuis installation
+  final double? whTotalInjecte;
   final String nomSonde1;
   final String nomSonde2;
   final String nomPpos;
@@ -1257,6 +1429,10 @@ class EspState {
     this.pwi = 0,
     this.pwsT = 0,
     this.pwiT = 0,
+    this.whJourSoutire,
+    this.whJourInjecte,
+    this.whTotalSoutire,
+    this.whTotalInjecte,
     this.nomSonde1 = '',
     this.nomSonde2 = '',
     this.nomPpos = 'Soutiré',
@@ -1279,6 +1455,10 @@ class EspState {
     double? pwi,
     double? pwsT,
     double? pwiT,
+    double? whJourSoutire,
+    double? whJourInjecte,
+    double? whTotalSoutire,
+    double? whTotalInjecte,
     String? nomSonde1,
     String? nomSonde2,
     String? nomPpos,
@@ -1298,6 +1478,10 @@ class EspState {
       pwi: pwi ?? this.pwi,
       pwsT: pwsT ?? this.pwsT,
       pwiT: pwiT ?? this.pwiT,
+      whJourSoutire: whJourSoutire ?? this.whJourSoutire,
+      whJourInjecte: whJourInjecte ?? this.whJourInjecte,
+      whTotalSoutire: whTotalSoutire ?? this.whTotalSoutire,
+      whTotalInjecte: whTotalInjecte ?? this.whTotalInjecte,
       nomSonde1: nomSonde1 ?? this.nomSonde1,
       nomSonde2: nomSonde2 ?? this.nomSonde2,
       nomPpos: nomPpos ?? this.nomPpos,
@@ -1337,6 +1521,7 @@ class _HomeScreenState extends State<HomeScreen> {
   SunologyClient?  _sunoClient;
   ApSystemsClient? _apClient;
   HoymilesClient?  _hoyClient;
+  HoymilesOpenDtuClient? _openDtuClient;
   DateTime? _lastHoymilesRefresh; // pour imposer le rate-limit strict de 15mn
   bool _solarRefreshInProgress = false; // évite les cycles qui se chevauchent
   Timer? _solarTimer;
@@ -1396,6 +1581,7 @@ class _HomeScreenState extends State<HomeScreen> {
             enabledTempIndices: c.containsKey('enabled_temps')
                 ? (c['enabled_temps'] as List?)?.cast<int>()
                 : null,
+            phaseMode: (c['phase_mode'] as String?) ?? 'mono',
           ));
         }
       }
@@ -1508,6 +1694,7 @@ class _HomeScreenState extends State<HomeScreen> {
           // (null = pas de test = tout afficher → clé absente dans le JSON)
           if (c.enabledNumActions  != null) map['enabled']       = c.enabledNumActions;
           if (c.enabledTempIndices != null) map['enabled_temps'] = c.enabledTempIndices;
+          map['phase_mode'] = c.phaseMode;
           return map;
         }).toList(),
       });
@@ -1558,11 +1745,25 @@ class _HomeScreenState extends State<HomeScreen> {
         _solarConfig.hoymilesUsername.isNotEmpty)
         ? HoymilesClient(username: _solarConfig.hoymilesUsername, password: _solarConfig.hoymilesPassword)
         : null;
+    if (_solarConfig.enabled && _solarConfig.openDtuEnabled) {
+      if (_solarConfig.openDtuMode == 'direct' && _solarConfig.openDtuDirectUrl.isNotEmpty) {
+        _openDtuClient = HoymilesOpenDtuClient(mode: 'direct', directUrl: _solarConfig.openDtuDirectUrl);
+      } else if (_solarConfig.openDtuMode == 'router' && _solarConfig.openDtuRouterEspName.isNotEmpty) {
+        final esp = _espConfigs.where((e) => e.name == _solarConfig.openDtuRouterEspName);
+        _openDtuClient = HoymilesOpenDtuClient(
+            mode: 'router', routerUrl: esp.isNotEmpty ? esp.first.url : null);
+      } else {
+        _openDtuClient = null;
+      }
+    } else {
+      _openDtuClient = null;
+    }
   }
 
   bool get _solarTabEnabled => _solarConfig.enabled &&
       (_solarConfig.izypowerEnabled || _solarConfig.sunologyEnabled ||
-          _solarConfig.apsystemsEnabled || _solarConfig.hoymilesEnabled);
+          _solarConfig.apsystemsEnabled || _solarConfig.hoymilesEnabled ||
+          _solarConfig.openDtuEnabled);
 
   int get _totalPages =>
       (_displayMode == 'single' ? 1 : _espConfigs.length) + (_solarTabEnabled ? 1 : 0);
@@ -1778,6 +1979,22 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         }
       }
+      // Hoymiles via OpenDTU (local, pas de rate-limit strict comme le cloud)
+      if (_openDtuClient != null) {
+        try {
+          final inverters = await _openDtuClient!.fetchInverters();
+          if (mounted) setState(() {
+            _solarState = _solarState.copyWith(
+              openDtuInverters: inverters,
+              openDtuOk: true, openDtuStatus: TimeOfDay.now().format(context),
+            );
+          });
+        } catch (e) {
+          final msg = e.toString().replaceFirst('Exception: ', '');
+          final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
+          if (mounted) setState(() => _solarState = _solarState.copyWith(openDtuOk: false, openDtuStatus: short));
+        }
+      }
     } finally {
       _solarRefreshInProgress = false;
     }
@@ -1901,6 +2118,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ]).timeout(const Duration(seconds: 10));
 
       final pw      = parsePuissances(results[0]);
+      final energie = parseEnergieJour(results[0]);
       final modules = parseActionneurs(results[1]);
       final temps   = parseTemperatures(results[0]);
       final tj      = parseTempoJour(results[0]);
@@ -1923,6 +2141,10 @@ class _HomeScreenState extends State<HomeScreen> {
           pwi:  pw['pwi']!,
           pwsT: pw['pwsT']!,
           pwiT: pw['pwiT']!,
+          whJourSoutire:  energie['whJourSoutire'],
+          whJourInjecte:  energie['whJourInjecte'],
+          whTotalSoutire: energie['whTotalSoutire'],
+          whTotalInjecte: energie['whTotalInjecte'],
           tempoJour: tj,
           tempoJ1:   tj1,
           ok: true,
@@ -2147,13 +2369,25 @@ class _HomeScreenState extends State<HomeScreen> {
     ]);
   }
 
-  Widget _buildPowerCards(EspState state) {
+  Widget _buildPowerCards(EspState state, {String phaseMode = 'mono'}) {
+    // En triphasé, les retours de phase faussent Soutiré/Injecté pris isolément :
+    // seul le NET (Soutiré - Injecté) du jour est pertinent, et "Injecté jour"
+    // n'a pas de sens à afficher séparément.
+    final isTri = phaseMode == 'tri';
+    double? soutireJour = state.whJourSoutire;
+    double? injecteJour = state.whJourInjecte;
+    if (isTri && state.whJourSoutire != null && state.whJourInjecte != null) {
+      soutireJour = state.whJourSoutire! - state.whJourInjecte!;
+      injecteJour = null;
+    }
     return Row(children: [
       Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
-          color: const Color(0xFFF43F5E), labelColor: appLabelColor)),
+          color: const Color(0xFFF43F5E), labelColor: appLabelColor,
+          whJour: soutireJour)),
       const SizedBox(width: 10),
       Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
-          color: const Color(0xFF22D3A8), labelColor: appLabelColor)),
+          color: const Color(0xFF22D3A8), labelColor: appLabelColor,
+          whJour: injecteJour)),
     ]);
   }
 
@@ -2594,7 +2828,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                     _multiSites
                         ? _buildCombinedPowerCards()
-                        : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
+                        : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState(),
+                        phaseMode: _espConfigs.isNotEmpty ? _espConfigs.first.phaseMode : 'mono'),
                   ]),
                 ),
                 const SizedBox(height: 12),
@@ -2652,7 +2887,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                   _multiSites
                       ? _buildCombinedPowerCards()
-                      : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState()),
+                      : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState(),
+                      phaseMode: _espConfigs.isNotEmpty ? _espConfigs.first.phaseMode : 'mono'),
                   const SizedBox(height: 12),
                   forceW,
                   if (_solarTabEnabled) ...[
@@ -2747,12 +2983,14 @@ class _HomeScreenState extends State<HomeScreen> {
         .fold<double>(0, (sum, inv) => sum + (inv.powerW ?? 0));
     final hoyTotalPv = s.hoymilesStations
         .fold<double>(0, (sum, st) => sum + (st.powerW ?? 0));
-    return (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv + hoyTotalPv;
+    final openDtuTotalPv = s.openDtuInverters
+        .fold<double>(0, (sum, inv) => sum + (inv.powerW ?? 0));
+    return (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv + hoyTotalPv + openDtuTotalPv;
   }
 
   bool get _solarHasAnyValue =>
       _solarState.izyOk || _solarState.sunologyOk ||
-          _solarState.apsystemsOk || _solarState.hoymilesOk;
+          _solarState.apsystemsOk || _solarState.hoymilesOk || _solarState.openDtuOk;
 
   // ── Page suivi solaire (Izypower / Sunology) ────────────────────────────────
   Widget _buildSolarPage(BuildContext context) {
@@ -2762,6 +3000,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final hasSuno = _solarConfig.sunologyEnabled;
     final hasAp   = _solarConfig.apsystemsEnabled;
     final hasHoy  = _solarConfig.hoymilesEnabled;
+    final hasOpenDtu = _solarConfig.openDtuEnabled;
 
     // Total journalier cumulé (kWh) toutes sources activées confondues.
     // Sunology stocke sa valeur "Jour" en texte déjà formaté par l'API
@@ -2795,6 +3034,15 @@ class _HomeScreenState extends State<HomeScreen> {
           .fold<double>(0, (sum, st) => sum + st.todayKwh!);
       if (s.hoymilesStations.any((st) => st.todayKwh != null)) {
         dailyTotalKwh = (dailyTotalKwh ?? 0) + hoyDaily;
+      }
+    }
+    if (hasOpenDtu) {
+      // yieldDayWh est en Wh (doc OpenDTU) → conversion en kWh pour le cumul
+      final openDtuDaily = s.openDtuInverters
+          .where((inv) => inv.yieldDayWh != null)
+          .fold<double>(0, (sum, inv) => sum + inv.yieldDayWh! / 1000);
+      if (s.openDtuInverters.any((inv) => inv.yieldDayWh != null)) {
+        dailyTotalKwh = (dailyTotalKwh ?? 0) + openDtuDaily;
       }
     }
 
@@ -3145,6 +3393,75 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           const SizedBox(height: 20),
         ],
+
+        // ── Section Hoymiles via OpenDTU (un bloc par onduleur) ────────────────
+        if (hasOpenDtu) ...[
+          _solarSectionHeader('HOYMILES · OPENDTU', const Color(0xFFA855F7), s.openDtuOk, s.openDtuStatus),
+          const SizedBox(height: 10),
+          if (s.openDtuInverters.isEmpty)
+            Text('Aucun onduleur trouvé', style: TextStyle(fontSize: 12, color: appLabelColor))
+          else
+            for (var i = 0; i < s.openDtuInverters.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              Builder(builder: (_) {
+                final inv = s.openDtuInverters[i];
+                String? kwh(double? v) => v != null ? '${v.toStringAsFixed(2)} kWh' : null;
+                String? wh(double? v) => v != null ? '${v.round()} Wh' : null;
+                String? freshness(int? ms) {
+                  if (ms == null) return null;
+                  final sec = ms ~/ 1000;
+                  if (sec < 60) return 'il y a ${sec}s';
+                  if (sec < 3600) return 'il y a ${sec ~/ 60}min';
+                  return 'il y a ${sec ~/ 3600}h';
+                }
+                return Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D1420),
+                    border: Border.all(color: Colors.white.withOpacity(0.06)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Expanded(
+                        child: Text(inv.name.toUpperCase(),
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2, color: appLabelColor)),
+                      ),
+                      Container(width: 6, height: 6, decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: inv.reachable ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E))),
+                      const SizedBox(width: 5),
+                      Text(inv.reachable ? (inv.producing ? 'production' : 'connecté') : 'injoignable',
+                          style: TextStyle(fontSize: 10, color: appLabelColor)),
+                    ]),
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Icon(Icons.solar_power_outlined, color: const Color(0xFFFACC15), size: 20),
+                      const SizedBox(width: 8),
+                      Text(inv.powerW != null ? '${inv.powerW!.round()} W' : '--',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 20,
+                              fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+                    ]),
+                    const SizedBox(height: 10),
+                    IntrinsicHeight(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Expanded(child: _solarMiniStat('Jour', wh(inv.yieldDayWh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Total', kwh(inv.yieldTotalKwh))),
+                      ]),
+                    ),
+                    if (inv.dataAgeMs != null) ...[
+                      const SizedBox(height: 8),
+                      Text('Dernière mesure : ${freshness(inv.dataAgeMs)}',
+                          style: TextStyle(fontSize: 10, color: appLabelColor)),
+                    ],
+                  ]),
+                );
+              }),
+            ],
+          const SizedBox(height: 20),
+        ],
       ]),
     );
 
@@ -3392,7 +3709,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       _buildTempoWidget(state),
                       const SizedBox(height: 6),
                     ],
-                    _buildPowerCards(state),
+                    _buildPowerCards(state, phaseMode: cfg.phaseMode),
                   ]),
                 ),
                 const SizedBox(height: 12),
@@ -3472,7 +3789,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     _buildTempoWidget(state),
                     const SizedBox(height: 6),
                   ],
-                  _buildPowerCards(state),
+                  _buildPowerCards(state, phaseMode: cfg.phaseMode),
                   const SizedBox(height: 12),
                   _buildForceWidget(state, espIdx, selected, multiModules),
                   const SizedBox(height: 10),
@@ -4019,8 +4336,9 @@ class PowerCard extends StatelessWidget {
   final double value;
   final Color  color;
   final Color  labelColor;
+  final double? whJour; // cumul du jour en Wh, si dispo (ex: Shelly EM en 2e sonde)
   const PowerCard({super.key, required this.label, required this.value,
-    required this.color, this.labelColor = const Color(0xFF5A6278)});
+    required this.color, this.labelColor = const Color(0xFF5A6278), this.whJour});
 
   @override
   Widget build(BuildContext context) {
@@ -4057,6 +4375,15 @@ class PowerCard extends StatelessWidget {
                   style: TextStyle(fontSize: 11, color: labelColor, fontFamily: 'monospace')),
             ],
           ),
+          if (whJour != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              whJour! >= 1000
+                  ? '${(whJour! / 1000).toStringAsFixed(1)} kWh aujourd\'hui'
+                  : '${whJour!.round()} Wh aujourd\'hui',
+              style: TextStyle(fontSize: 10, color: labelColor, fontFamily: 'monospace'),
+            ),
+          ],
         ],
       ),
     );
@@ -4255,13 +4582,16 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
   // ── Suivi solaire ────────────────────────────────────────────────────────
   late bool _solarEnabled;
-  late bool _sunologyEnabled, _izypowerEnabled, _apsystemsEnabled, _hoymilesEnabled;
+  late bool _sunologyEnabled, _izypowerEnabled, _apsystemsEnabled, _hoymilesEnabled, _openDtuEnabled;
   late TextEditingController _sunoEmailCtrl, _sunoPwdCtrl;
   late TextEditingController _izyEmailCtrl, _izyPwdCtrl, _izyStationCtrl, _izyBatterySnCtrl;
   late TextEditingController _apUserCtrl, _apPwdCtrl;
   late TextEditingController _hoyUserCtrl, _hoyPwdCtrl;
+  late TextEditingController _openDtuUrlCtrl;
+  late String _openDtuMode; // 'direct' ou 'router'
+  late String _openDtuRouterEspName;
   late TextEditingController _totalCapacityCtrl;
-  bool _sunoTesting = false, _izyTesting = false, _apTesting = false, _hoyTesting = false;
+  bool _sunoTesting = false, _izyTesting = false, _apTesting = false, _hoyTesting = false, _openDtuTesting = false;
   bool _izyDiscovering = false;
   String? _izyDiscoverError;
   bool _izyBattDiscovering = false;
@@ -4270,7 +4600,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
   String? _izyTestResult;
   String? _apTestResult;
   String? _hoyTestResult;
-  bool _sunoTestOk = false, _izyTestOk = false, _apTestOk = false, _hoyTestOk = false;
+  String? _openDtuTestResult;
+  bool _sunoTestOk = false, _izyTestOk = false, _apTestOk = false, _hoyTestOk = false, _openDtuTestOk = false;
   // Liste des onduleurs découverts au test, dans l'ordre choisi par l'utilisateur
   // (devId + nom) — réordonnable avec les boutons haut/bas.
   List<({String devId, String name})>? _apDiscoveredInverters;
@@ -4279,6 +4610,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
   late List<List<_TempChoice>?>   _testedTemps;   // null=non testé, []= aucun capteur
   late List<bool> _testing;
+  late List<String> _phaseModes; // 'mono' ou 'tri' par ESP
 
   @override
   void initState() {
@@ -4295,6 +4627,11 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _izypowerEnabled  = sc.izypowerEnabled;
     _apsystemsEnabled = sc.apsystemsEnabled;
     _hoymilesEnabled  = sc.hoymilesEnabled;
+    _openDtuEnabled   = sc.openDtuEnabled;
+    _openDtuMode      = sc.openDtuMode;
+    _openDtuRouterEspName = sc.openDtuRouterEspName.isNotEmpty
+        ? sc.openDtuRouterEspName
+        : (widget.currentConfigs.isNotEmpty ? widget.currentConfigs.first.name : '');
     _sunoEmailCtrl    = TextEditingController(text: sc.sunologyEmail);
     _sunoPwdCtrl      = TextEditingController(text: sc.sunologyPassword);
     _izyEmailCtrl     = TextEditingController(text: sc.izypowerEmail);
@@ -4305,6 +4642,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _apPwdCtrl        = TextEditingController(text: sc.apsystemsPassword);
     _hoyUserCtrl      = TextEditingController(text: sc.hoymilesUsername);
     _hoyPwdCtrl       = TextEditingController(text: sc.hoymilesPassword);
+    _openDtuUrlCtrl   = TextEditingController(text: sc.openDtuDirectUrl);
     _totalCapacityCtrl = TextEditingController(
         text: sc.totalCapacityW > 0 ? sc.totalCapacityW.round().toString() : '');
     _ctrls = widget.currentConfigs.map((c) => {
@@ -4315,6 +4653,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _testedModules = List.generate(_count, (_) => null);
     _testedTemps   = List.generate(_count, (_) => null);
     _testing       = List.generate(_count, (_) => false);
+    _phaseModes    = List.generate(_count, (i) =>
+    i < widget.currentConfigs.length ? widget.currentConfigs[i].phaseMode : 'mono');
 
     // Auto-test au chargement pour les ESPs déjà configurés (URL présente)
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -4338,6 +4678,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _izyBatterySnCtrl.dispose();
     _apUserCtrl.dispose(); _apPwdCtrl.dispose();
     _hoyUserCtrl.dispose(); _hoyPwdCtrl.dispose();
+    _openDtuUrlCtrl.dispose();
     _totalCapacityCtrl.dispose();
     super.dispose();
   }
@@ -4583,6 +4924,38 @@ class _ConfigSheetState extends State<ConfigSheet> {
     }
   }
 
+  Future<void> _testOpenDtu() async {
+    setState(() { _openDtuTesting = true; _openDtuTestResult = null; });
+    try {
+      HoymilesOpenDtuClient client;
+      if (_openDtuMode == 'direct') {
+        if (_openDtuUrlCtrl.text.trim().isEmpty) {
+          throw Exception('Renseigne l\'URL OpenDTU ci-dessus');
+        }
+        client = HoymilesOpenDtuClient(mode: 'direct', directUrl: _openDtuUrlCtrl.text.trim());
+      } else {
+        final esp = widget.currentConfigs.where((e) => e.name == _openDtuRouterEspName);
+        client = HoymilesOpenDtuClient(
+            mode: 'router', routerUrl: esp.isNotEmpty ? esp.first.url : null);
+      }
+      final inverters = await client.fetchInverters();
+      setState(() {
+        _openDtuTestOk = true;
+        _openDtuTestResult = inverters.isEmpty
+            ? 'Connecté (aucun onduleur trouvé)'
+            : 'Connecté · ${inverters.length} onduleur(s)';
+        _openDtuTesting = false;
+      });
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _openDtuTestOk = false;
+        _openDtuTestResult = 'Échec : $msg';
+        _openDtuTesting = false;
+      });
+    }
+  }
+
   void _moveApInverter(int index, int delta) {
     if (_apDiscoveredInverters == null) return;
     final newIndex = index + delta;
@@ -4607,6 +4980,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testedModules.add(null);
       _testedTemps.add(null);
       _testing.add(false);
+      _phaseModes.add('mono');
     });
   }
 
@@ -4618,6 +4992,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testedModules.removeLast();
       _testedTemps.removeLast();
       _testing.removeLast();
+      _phaseModes.removeLast();
       _count--;
     });
   }
@@ -4783,6 +5158,44 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 autocorrect: false,
                 decoration: _inputDeco('Laisser vide si aucun'),
               ),
+              const SizedBox(height: 10),
+
+              // ── Réseau mono/triphasé (impacte le calcul Soutiré/Injecté jour) ──
+              Text('Réseau électrique',
+                  style: TextStyle(fontSize: 12, color: appLabelColor)),
+              const SizedBox(height: 4),
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0A0F1A),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white.withOpacity(0.08)),
+                ),
+                child: Row(children: [
+                  for (final opt in const [('mono', 'Monophasé'), ('tri', 'Triphasé')])
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() => _phaseModes[i] = opt.$1),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          decoration: BoxDecoration(
+                            color: _phaseModes[i] == opt.$1
+                                ? const Color(0xFFF97316) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(11),
+                          ),
+                          child: Text(opt.$2, textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                  color: _phaseModes[i] == opt.$1 ? Colors.white : appLabelColor)),
+                        ),
+                      ),
+                    ),
+                ]),
+              ),
+              if (_phaseModes[i] == 'tri') ...[
+                const SizedBox(height: 4),
+                Text('En triphasé, "Soutiré jour" = Soutiré − Injecté (retours de phase), "Injecté jour" masqué',
+                    style: TextStyle(fontSize: 10, color: appLabelColor)),
+              ],
               const SizedBox(height: 10),
 
               // ── Bouton Test ────────────────────────────────────────────────
@@ -5283,6 +5696,129 @@ class _ConfigSheetState extends State<ConfigSheet> {
                   ),
                 ],
               ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // Hoymiles via OpenDTU (local — routeur F1ATB ou URL directe)
+              CheckboxListTile(
+                value: _openDtuEnabled,
+                onChanged: (v) => setState(() => _openDtuEnabled = v!),
+                title: const Text('Hoymiles (OpenDTU)',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                subtitle: const Text('Firmware DTU local — temps réel, sans compte cloud',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                activeColor: const Color(0xFFA855F7),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_openDtuEnabled) ...[
+                const SizedBox(height: 6),
+                // Sélecteur de mode : via routeur F1ATB ou URL directe
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0A0F1A),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                  ),
+                  child: Row(children: [
+                    for (final opt in const [('router', '⇄ Routeur F1ATB'), ('direct', '🔗 URL directe')])
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () => setState(() => _openDtuMode = opt.$1),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            decoration: BoxDecoration(
+                              color: _openDtuMode == opt.$1
+                                  ? const Color(0xFFA855F7) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(11),
+                            ),
+                            child: Text(opt.$2, textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                    color: _openDtuMode == opt.$1 ? Colors.white : appLabelColor)),
+                          ),
+                        ),
+                      ),
+                  ]),
+                ),
+                const SizedBox(height: 8),
+                if (_openDtuMode == 'direct') ...[
+                  TextField(
+                    controller: _openDtuUrlCtrl,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                    decoration: _inputDeco('http://192.168.1.X (ou URL distante)'),
+                  ),
+                  const SizedBox(height: 4),
+                  Text('IP locale si même réseau que le téléphone, ou URL distante si tu as monté ton propre accès (VPN, DDNS…)',
+                      style: TextStyle(fontSize: 10, color: appLabelColor)),
+                ] else ...[
+                  // Mode routeur : sélection parmi les ESP déjà configurés
+                  Text('Routeur F1ATB relais', style: TextStyle(fontSize: 11, color: appLabelColor)),
+                  const SizedBox(height: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0F1A),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _ctrls.isNotEmpty &&
+                            _ctrls.any((c) => c['name']!.text == _openDtuRouterEspName)
+                            ? _openDtuRouterEspName
+                            : (_ctrls.isNotEmpty ? _ctrls.first['name']!.text : null),
+                        isExpanded: true,
+                        dropdownColor: const Color(0xFF111827),
+                        style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                        items: _ctrls.map((c) => DropdownMenuItem(
+                            value: c['name']!.text, child: Text(c['name']!.text))).toList(),
+                        onChanged: (v) => setState(() => _openDtuRouterEspName = v ?? ''),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text('Le routeur doit avoir un firmware étendu pour relayer OpenDTU (via son adresse LAN configurée côté firmware)',
+                      style: TextStyle(fontSize: 10, color: appLabelColor)),
+                ],
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _openDtuTesting ? null : _testOpenDtu,
+                    icon: _openDtuTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFA855F7)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFFA855F7)),
+                    label: Text(_openDtuTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFFA855F7))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFA855F7), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_openDtuTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _openDtuTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_openDtuTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_openDtuTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _openDtuTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_openDtuTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _openDtuTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+              ],
             ],
             const SizedBox(height: 16),
 
@@ -5376,6 +5912,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       password: m['pwd']!.text.trim(),
                       enabledNumActions:  enabled,
                       enabledTempIndices: enabledTemps,
+                      phaseMode: _phaseModes[i],
                     );
                   }).toList();
                   final solarConfig = SolarConfig(
@@ -5397,6 +5934,10 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     hoymilesEnabled: _hoymilesEnabled,
                     hoymilesUsername: _hoyUserCtrl.text.trim(),
                     hoymilesPassword: _hoyPwdCtrl.text,
+                    openDtuEnabled: _openDtuEnabled,
+                    openDtuMode: _openDtuMode,
+                    openDtuDirectUrl: _openDtuUrlCtrl.text.trim(),
+                    openDtuRouterEspName: _openDtuRouterEspName,
                     totalCapacityW: double.tryParse(_totalCapacityCtrl.text.trim()) ?? 0,
                   );
                   await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor, solarConfig);
