@@ -68,6 +68,9 @@ v4.8.1 - Intégration Hoymiles S-Miles Cloud (auth multi-profils Argon2id) + tra
 
 v4.8.2 - Transparence infobulles graphiques 1an, axe Y fixe sur le graphique 1 an
 
+v4.8.5 - Hoymiles via OpenDTU
+
+v4.8.6 - Énergie jour Wh affichée sur Soutiré/Injecté avec support mono/triphasé
 
 --------
 
