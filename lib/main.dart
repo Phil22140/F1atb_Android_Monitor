@@ -5078,8 +5078,16 @@ class _ConfigSheetState extends State<ConfigSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        left: 20, right: 20, top: 20,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+        left: 20, right: 20,
+        // + zone sûre du haut (encoche/caméra perforée), sinon la 1ère ligne
+        // peut se retrouver masquée par la caméra sur les fiches longues
+        // (config étendue avec plusieurs ESP + fournisseurs solaires).
+        top: MediaQuery.of(context).padding.top + 20,
+        // + zone sûre du bas (barre de navigation Android, gestes ou 3 boutons)
+        // ET clavier si ouvert — viewInsets.bottom seul ne gère que le clavier,
+        // pas la barre système, d'où le bouton Valider à moitié masqué sans ça.
+        bottom: MediaQuery.of(context).viewInsets.bottom
+            + MediaQuery.of(context).padding.bottom + 20,
       ),
       child: SingleChildScrollView(
         child: Column(
