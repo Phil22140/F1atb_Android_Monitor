@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.8.8';
+const String appVersion = '4.8.9';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -5079,9 +5079,9 @@ class _ConfigSheetState extends State<ConfigSheet> {
     return Padding(
       padding: EdgeInsets.only(
         left: 20, right: 20,
-        // + zone sûre du haut (encoche/caméra perforée), sinon la 1ère ligne
-        // peut se retrouver masquée par la caméra sur les fiches longues
-        // (config étendue avec plusieurs ESP + fournisseurs solaires).
+        // + zone sûre du haut (encoche/caméra perforée). Le compteur ESP est
+        // désormais sur sa propre ligne centrée (jamais dans un coin), donc
+        // plus besoin de marge supplémentaire en dur pour compenser.
         top: MediaQuery.of(context).padding.top + 20,
         // + zone sûre du bas (barre de navigation Android, gestes ou 3 boutons)
         // ET clavier si ouvert — viewInsets.bottom seul ne gère que le clavier,
@@ -5094,14 +5094,27 @@ class _ConfigSheetState extends State<ConfigSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Titre + compteur ESP ─────────────────────────────────────────
-            Row(children: [
-              Expanded(
-                child: Text('Configuration',
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                        letterSpacing: 2.5, color: appLabelColor)),
+            // Petite poignée visuelle (pratique courante des bottom sheets) —
+            // ajoute aussi un peu de marge naturelle en plus de la zone sûre.
+            Center(
+              child: Container(
+                width: 36, height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-              Container(
+            ),
+            // ── Titre, puis compteur ESP centré sur sa propre ligne ───────────
+            // (jamais sur la même ligne qu'une éventuelle caméra perforée,
+            // quel que soit l'appareil — plus robuste qu'une marge en dur)
+            Text('Configuration',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                    letterSpacing: 2.5, color: appLabelColor)),
+            const SizedBox(height: 10),
+            Center(
+              child: Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFF0A0F1A),
                   borderRadius: BorderRadius.circular(10),
@@ -5118,7 +5131,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                   _stepBtn('+', _count < 9, _addEsp),
                 ]),
               ),
-            ]),
+            ),
             const SizedBox(height: 16),
 
             // ── Groupes par ESP ──────────────────────────────────────────────
