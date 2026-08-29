@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.8.6';
+const String appVersion = '4.8.8';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -2380,15 +2380,17 @@ class _HomeScreenState extends State<HomeScreen> {
       soutireJour = state.whJourSoutire! - state.whJourInjecte!;
       injecteJour = null;
     }
-    return Row(children: [
-      Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
-          color: const Color(0xFFF43F5E), labelColor: appLabelColor,
-          whJour: soutireJour)),
-      const SizedBox(width: 10),
-      Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
-          color: const Color(0xFF22D3A8), labelColor: appLabelColor,
-          whJour: injecteJour)),
-    ]);
+    return IntrinsicHeight(
+      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
+            color: const Color(0xFFF43F5E), labelColor: appLabelColor,
+            whJour: soutireJour)),
+        const SizedBox(width: 10),
+        Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
+            color: const Color(0xFF22D3A8), labelColor: appLabelColor,
+            whJour: injecteJour)),
+      ]),
+    );
   }
 
   Widget _buildSecondeSonde(EspState state) {
@@ -3070,7 +3072,7 @@ class _HomeScreenState extends State<HomeScreen> {
             style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
                 letterSpacing: 2, color: appLabelColor)),
         const SizedBox(height: 10),
-        PowerGaugeWidget(value: totalPv, hasValue: (s.izyOk || s.sunologyOk || s.apsystemsOk),
+        PowerGaugeWidget(value: totalPv, hasValue: _solarHasAnyValue,
             maxValue: _solarConfig.totalCapacityW),
         if (dailyTotalKwh != null) ...[
           const SizedBox(height: 4),
