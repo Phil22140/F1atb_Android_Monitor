@@ -72,6 +72,8 @@ v4.8.5 - Hoymiles via OpenDTU
 
 v4.8.6 - Énergie jour Wh affichée sur Soutiré/Injecté avec support mono/triphasé
 
+v4.8.7 - Correction Bug affichage OpenDTU + Bloc Injecté en Triphasé
+
 --------
 
 
