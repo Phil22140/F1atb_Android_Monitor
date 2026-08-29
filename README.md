@@ -76,6 +76,8 @@ v4.8.7 - Correction Bug affichage OpenDTU + Bloc Injecté en Triphasé
 
 v4.8.8 - Correctifs zones sûres (haut/bas) du panneau de configuration
 
+v4.8.9 - Compatibilité panneau de config avec Samsung S10
+
 --------
 
 
