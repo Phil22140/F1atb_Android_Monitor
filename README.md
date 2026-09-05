@@ -78,6 +78,8 @@ v4.8.8 - Correctifs zones sûres (haut/bas) du panneau de configuration
 
 v4.8.9 - Compatibilité panneau de config avec Samsung S10
 
+v4.9.0 - Correction Bug de test de connexion
+
 --------
 
 
