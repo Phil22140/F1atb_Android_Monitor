@@ -1,7 +1,7 @@
 name: chauffe_eau
 description: Widget chauffe-eau ESP32 F1ATB
 publish_to: 'none'
-version: 4.8.9+121
+version: 4.9.0+122
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

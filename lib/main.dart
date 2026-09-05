@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.8.9';
+const String appVersion = '4.9.0';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -4612,6 +4612,11 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
   late List<List<_TempChoice>?>   _testedTemps;   // null=non testé, []= aucun capteur
   late List<bool> _testing;
+  // Distingue un VRAI échec (exception réseau) d'un succès légitime sur un
+  // routeur sans action configurée (ex: monitoring pur, sans chauffe-eau/
+  // radiateur à piloter) — les deux donnaient auparavant _testedModules=[]
+  // de façon indiscernable, faisant afficher "Connexion échouée" à tort.
+  late List<bool> _testFailed;
   late List<String> _phaseModes; // 'mono' ou 'tri' par ESP
 
   @override
@@ -4655,6 +4660,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _testedModules = List.generate(_count, (_) => null);
     _testedTemps   = List.generate(_count, (_) => null);
     _testing       = List.generate(_count, (_) => false);
+    _testFailed    = List.generate(_count, (_) => false);
     _phaseModes    = List.generate(_count, (i) =>
     i < widget.currentConfigs.length ? widget.currentConfigs[i].phaseMode : 'mono');
 
@@ -4983,6 +4989,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testedTemps.add(null);
       _testing.add(false);
       _phaseModes.add('mono');
+      _testFailed.add(false);
     });
   }
 
@@ -4995,6 +5002,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testedTemps.removeLast();
       _testing.removeLast();
       _phaseModes.removeLast();
+      _testFailed.removeLast();
       _count--;
     });
   }
@@ -5044,12 +5052,14 @@ class _ConfigSheetState extends State<ConfigSheet> {
         )).toList();
         _testedTemps[idx] = tempChoices;
         _testing[idx] = false;
+        _testFailed[idx] = false; // succès, même si 0 action trouvée
       });
     } catch (_) {
       setState(() {
         _testedModules[idx] = [];
         _testedTemps[idx]   = [];
         _testing[idx]       = false;
+        _testFailed[idx]    = true; // vrai échec (exception réseau/timeout)
       });
     }
   }
@@ -5248,8 +5258,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
               // ── Résultat du test ───────────────────────────────────────────
               if (_testedModules[i] != null) ...[
                 const SizedBox(height: 8),
-                if (_testedModules[i]!.isEmpty)
-                // Échec
+                if (_testFailed[i])
+                // Vrai échec (exception réseau/timeout/mot de passe...)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
@@ -5265,7 +5275,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     ]),
                   )
                 else ...[
-                  // Succès + checkboxes
+                  // Succès (même si 0 action trouvée : routeur valide utilisé
+                  // uniquement pour du monitoring, sans chauffe-eau/radiateur)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
@@ -5273,11 +5284,14 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: const Color(0xFF22C55E).withOpacity(0.4)),
                     ),
-                    child: const Row(children: [
-                      Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF22C55E)),
-                      SizedBox(width: 6),
-                      Text('Connexion OK — choisir les jauges à afficher :',
-                          style: TextStyle(fontSize: 12, color: Color(0xFF22C55E))),
+                    child: Row(children: [
+                      const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF22C55E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(
+                          _testedModules[i]!.isEmpty
+                              ? 'Connexion OK — aucune action à piloter (monitoring uniquement)'
+                              : 'Connexion OK — choisir les jauges à afficher :',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF22C55E)))),
                     ]),
                   ),
                   const SizedBox(height: 4),
@@ -5898,17 +5912,13 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     // Détermine les modules activés
                     List<int>? enabled;
                     final tested = _testedModules[i];
-                    if (tested != null && tested.isNotEmpty) {
-                      // Test réussi → utilise les checkboxes (peut être [] si tout décoché)
+                    if (tested != null && !_testFailed[i]) {
+                      // Test réussi (même si 0 action trouvée = monitoring
+                      // pur, sans chauffe-eau/radiateur → liste vide légitime)
                       enabled = tested.where((m) => m.enabled)
                           .map((m) => m.numAction).toList();
-                    } else if (tested != null && tested.isEmpty) {
-                      // Test échoué → conserve l'existant
-                      enabled = i < widget.currentConfigs.length
-                          ? widget.currentConfigs[i].enabledNumActions
-                          : null;
                     } else {
-                      // Non testé → conserve l'existant (null=tout afficher)
+                      // Non testé OU vrai échec → conserve l'existant
                       enabled = i < widget.currentConfigs.length
                           ? widget.currentConfigs[i].enabledNumActions
                           : null;
