@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.9.0';
+const String appVersion = '4.10.0';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -284,6 +284,9 @@ class SolarConfig {
   final String openDtuMode;      // 'direct' ou 'router'
   final String openDtuDirectUrl; // mode direct : URL de base OpenDTU
   final String openDtuRouterEspName; // mode routeur : nom de l'ESP F1ATB relais
+  final bool meteoEnabled;
+  final double? meteoLat, meteoLon;
+  final String meteoLocationName; // nom affiché (ville géocodée, ou "coordonnées perso")
   final double totalCapacityW; // puissance crête installée totale (W), pour calibrer la jauge
   const SolarConfig({
     this.enabled = false,
@@ -306,6 +309,10 @@ class SolarConfig {
     this.openDtuMode = 'direct',
     this.openDtuDirectUrl = '',
     this.openDtuRouterEspName = '',
+    this.meteoEnabled = false,
+    this.meteoLat,
+    this.meteoLon,
+    this.meteoLocationName = '',
     this.totalCapacityW = 0,
   });
 
@@ -316,6 +323,7 @@ class SolarConfig {
     String? apsystemsPassword, List<String>? apsystemsOrder,
     bool? hoymilesEnabled, String? hoymilesUsername, String? hoymilesPassword,
     bool? openDtuEnabled, String? openDtuMode, String? openDtuDirectUrl, String? openDtuRouterEspName,
+    bool? meteoEnabled, double? meteoLat, double? meteoLon, String? meteoLocationName,
     double? totalCapacityW,
   }) {
     return SolarConfig(
@@ -339,6 +347,10 @@ class SolarConfig {
       openDtuMode: openDtuMode ?? this.openDtuMode,
       openDtuDirectUrl: openDtuDirectUrl ?? this.openDtuDirectUrl,
       openDtuRouterEspName: openDtuRouterEspName ?? this.openDtuRouterEspName,
+      meteoEnabled: meteoEnabled ?? this.meteoEnabled,
+      meteoLat: meteoLat ?? this.meteoLat,
+      meteoLon: meteoLon ?? this.meteoLon,
+      meteoLocationName: meteoLocationName ?? this.meteoLocationName,
       totalCapacityW: totalCapacityW ?? this.totalCapacityW,
     );
   }
@@ -364,6 +376,10 @@ class SolarConfig {
     'opendtu_mode': openDtuMode,
     'opendtu_direct_url': openDtuDirectUrl,
     'opendtu_router_esp_name': openDtuRouterEspName,
+    'meteo_enabled': meteoEnabled,
+    'meteo_lat': meteoLat,
+    'meteo_lon': meteoLon,
+    'meteo_location_name': meteoLocationName,
     'total_capacity_w': totalCapacityW,
   };
 
@@ -388,6 +404,10 @@ class SolarConfig {
     openDtuMode: j['opendtu_mode'] as String? ?? 'direct',
     openDtuDirectUrl: j['opendtu_direct_url'] as String? ?? '',
     openDtuRouterEspName: j['opendtu_router_esp_name'] as String? ?? '',
+    meteoEnabled: j['meteo_enabled'] as bool? ?? false,
+    meteoLat: (j['meteo_lat'] as num?)?.toDouble(),
+    meteoLon: (j['meteo_lon'] as num?)?.toDouble(),
+    meteoLocationName: j['meteo_location_name'] as String? ?? '',
     totalCapacityW: (j['total_capacity_w'] as num?)?.toDouble() ?? 0,
   );
 }
@@ -425,6 +445,10 @@ class SolarState {
   final List<OpenDtuInverter> openDtuInverters;
   final bool openDtuOk;
   final String openDtuStatus;
+  // Météo locale (Open-Meteo)
+  final WeatherData? weather;
+  final bool weatherOk;
+  final String weatherStatus;
 
   const SolarState({
     this.sunologyPvW, this.sunologyDayTxt, this.sunologyWeekTxt,
@@ -444,6 +468,7 @@ class SolarState {
     this.hoymilesOk = false, this.hoymilesStatus = 'connexion…',
     this.openDtuInverters = const [],
     this.openDtuOk = false, this.openDtuStatus = 'connexion…',
+    this.weather, this.weatherOk = false, this.weatherStatus = 'connexion…',
   });
 
   SolarState copyWith({
@@ -464,6 +489,7 @@ class SolarState {
     bool? hoymilesOk, String? hoymilesStatus,
     List<OpenDtuInverter>? openDtuInverters,
     bool? openDtuOk, String? openDtuStatus,
+    WeatherData? weather, bool? weatherOk, String? weatherStatus,
   }) {
     return SolarState(
       sunologyPvW: sunologyPvW ?? this.sunologyPvW,
@@ -504,6 +530,9 @@ class SolarState {
       openDtuInverters: openDtuInverters ?? this.openDtuInverters,
       openDtuOk: openDtuOk ?? this.openDtuOk,
       openDtuStatus: openDtuStatus ?? this.openDtuStatus,
+      weather: weather ?? this.weather,
+      weatherOk: weatherOk ?? this.weatherOk,
+      weatherStatus: weatherStatus ?? this.weatherStatus,
     );
   }
 }
@@ -1379,6 +1408,203 @@ class HoymilesOpenDtuClient {
   }
 }
 
+// ── Météo locale (Open-Meteo) ──────────────────────────────────────────────────
+// Gratuit, sans clé API pour un usage non-commercial. Deux appels distincts :
+// géocodage (une fois, à la config) et prévisions (régulièrement, ~15-30mn,
+// avec les coordonnées déjà résolues — jamais re-géocodé à chaque refresh).
+
+class OpenMeteoGeocodingResult {
+  final String name;
+  final double latitude, longitude;
+  final String? admin1, country;
+  const OpenMeteoGeocodingResult({
+    required this.name, required this.latitude, required this.longitude,
+    this.admin1, this.country,
+  });
+}
+
+class WeatherHourPoint {
+  final DateTime time;
+  final double? tempC;
+  final int? weatherCode;
+  final double? shortwaveRadiation; // W/m² — proxy standard de prod. solaire attendue
+  final double? precipProbability;  // %
+  final bool isDay;
+  const WeatherHourPoint({
+    required this.time, this.tempC, this.weatherCode,
+    this.shortwaveRadiation, this.precipProbability, this.isDay = true,
+  });
+}
+
+class WeatherDaily {
+  final DateTime date;
+  final int? weatherCode;
+  final double? tempMax, tempMin;
+  final String? sunrise, sunset; // ISO8601, affichés tels quels (déjà en heure locale via timezone=auto)
+  const WeatherDaily({
+    required this.date, this.weatherCode, this.tempMax, this.tempMin,
+    this.sunrise, this.sunset,
+  });
+}
+
+class WeatherData {
+  final List<WeatherHourPoint> hoursToday;
+  final List<WeatherHourPoint> hoursTomorrow;
+  final WeatherDaily? dailyToday;
+  final WeatherDaily? dailyTomorrow;
+  final double? currentTempC;
+  final int? currentWeatherCode;
+  const WeatherData({
+    this.hoursToday = const [], this.hoursTomorrow = const [],
+    this.dailyToday, this.dailyTomorrow,
+    this.currentTempC, this.currentWeatherCode,
+  });
+
+  factory WeatherData.parse(Map<String, dynamic> json) {
+    final hourly    = json['hourly'] as Map<String, dynamic>?;
+    final timeList  = (hourly?['time'] as List?)?.cast<String>() ?? const [];
+    final tempList  = (hourly?['temperature_2m'] as List?) ?? const [];
+    final codeList  = (hourly?['weather_code'] as List?) ?? const [];
+    final radList   = (hourly?['shortwave_radiation'] as List?) ?? const [];
+    final precList  = (hourly?['precipitation_probability'] as List?) ?? const [];
+    final dayList   = (hourly?['is_day'] as List?) ?? const [];
+
+    final now = DateTime.now();
+    String isoDate(DateTime d) => '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final todayStr    = isoDate(now);
+    final tomorrowStr = isoDate(now.add(const Duration(days: 1)));
+
+    final hoursToday = <WeatherHourPoint>[];
+    final hoursTomorrow = <WeatherHourPoint>[];
+    for (var i = 0; i < timeList.length; i++) {
+      final t = DateTime.tryParse(timeList[i]);
+      if (t == null) continue;
+      final point = WeatherHourPoint(
+        time: t,
+        tempC: i < tempList.length ? asDouble(tempList[i]) : null,
+        weatherCode: i < codeList.length ? (codeList[i] as num?)?.toInt() : null,
+        shortwaveRadiation: i < radList.length ? asDouble(radList[i]) : null,
+        precipProbability: i < precList.length ? asDouble(precList[i]) : null,
+        isDay: i < dayList.length ? (dayList[i] == 1) : true,
+      );
+      if (timeList[i].startsWith(todayStr)) {
+        hoursToday.add(point);
+      } else if (timeList[i].startsWith(tomorrowStr)) {
+        hoursTomorrow.add(point);
+      }
+    }
+
+    final daily = json['daily'] as Map<String, dynamic>?;
+    final dTimeList = (daily?['time'] as List?)?.cast<String>() ?? const [];
+    WeatherDaily? dailyAt(int idx) {
+      if (idx >= dTimeList.length) return null;
+      double? numAt(String key) {
+        final list = daily?[key] as List?;
+        return (list != null && idx < list.length) ? asDouble(list[idx]) : null;
+      }
+      final codeArr = daily?['weather_code'] as List?;
+      final strArr  = <String, List?>{'sunrise': daily?['sunrise'] as List?, 'sunset': daily?['sunset'] as List?};
+      return WeatherDaily(
+        date: DateTime.tryParse(dTimeList[idx]) ?? now,
+        weatherCode: (codeArr != null && idx < codeArr.length) ? (codeArr[idx] as num?)?.toInt() : null,
+        tempMax: numAt('temperature_2m_max'),
+        tempMin: numAt('temperature_2m_min'),
+        sunrise: (strArr['sunrise'] != null && idx < strArr['sunrise']!.length) ? strArr['sunrise']![idx]?.toString() : null,
+        sunset:  (strArr['sunset']  != null && idx < strArr['sunset']!.length)  ? strArr['sunset']![idx]?.toString()  : null,
+      );
+    }
+
+    final current = json['current'] as Map<String, dynamic>?;
+
+    return WeatherData(
+      hoursToday: hoursToday,
+      hoursTomorrow: hoursTomorrow,
+      dailyToday: dailyAt(0),
+      dailyTomorrow: dailyAt(1),
+      currentTempC: asDouble(current?['temperature_2m']),
+      currentWeatherCode: (current?['weather_code'] as num?)?.toInt(),
+    );
+  }
+}
+
+class OpenMeteoClient {
+  Future<Map<String, dynamic>> _getJson(Uri uri) async {
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(uri);
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final text = await resp.transform(utf8.decoder).join();
+      final json = jsonDecode(text) as Map<String, dynamic>;
+      // Open-Meteo répond en HTTP 400 avec un JSON valide {"error":true,
+      // "reason":"..."} — sans cette vérification, l'erreur passait inaperçue
+      // silencieusement (JSON valide = pas d'exception, mais données absentes).
+      if (json['error'] == true) {
+        throw Exception(json['reason']?.toString() ?? 'Erreur Open-Meteo inconnue');
+      }
+      return json;
+    } finally {
+      client.close();
+    }
+  }
+
+  // À appeler une seule fois, quand l'utilisateur configure sa localisation.
+  Future<List<OpenMeteoGeocodingResult>> geocode(String query) async {
+    final uri = Uri.https('geocoding-api.open-meteo.com', '/v1/search', {
+      'name': query, 'count': '5', 'language': 'fr', 'format': 'json',
+    });
+    final json = await _getJson(uri);
+    final results = (json['results'] as List?) ?? const [];
+    return results.map((r) {
+      final m = r as Map<String, dynamic>;
+      return OpenMeteoGeocodingResult(
+        name: (m['name'] as String?) ?? '',
+        latitude: asDouble(m['latitude']) ?? 0,
+        longitude: asDouble(m['longitude']) ?? 0,
+        admin1: m['admin1'] as String?,
+        country: m['country'] as String?,
+      );
+    }).where((r) => r.name.isNotEmpty).toList();
+  }
+
+  // À appeler régulièrement (~15-30mn), avec les coordonnées déjà résolues.
+  // Fenêtre limitée à aujourd'hui+demain (start_date/end_date) : plus léger
+  // que les 7 jours par défaut, et couvre exactement ce dont on a besoin.
+  Future<WeatherData> fetchWeather(double lat, double lon) async {
+    final today = DateTime.now();
+    final tomorrow = today.add(const Duration(days: 1));
+    String isoDate(DateTime d) => '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final uri = Uri.https('api.open-meteo.com', '/v1/forecast', {
+      'latitude': lat.toString(),
+      'longitude': lon.toString(),
+      'hourly': 'temperature_2m,weather_code,shortwave_radiation,precipitation_probability,is_day',
+      'daily': 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset',
+      'current': 'temperature_2m,weather_code,is_day',
+      'start_date': isoDate(today),
+      'end_date': isoDate(tomorrow),
+      'timezone': 'auto',
+    });
+    final json = await _getJson(uri);
+    return WeatherData.parse(json);
+  }
+}
+
+// Icônes Material (sûres, présentes de longue date) pour les codes météo WMO.
+IconData weatherIconFor(int? code, {bool isDay = true}) {
+  if (code == null) return Icons.help_outline;
+  if (code == 0) return isDay ? Icons.wb_sunny : Icons.nightlight_round;
+  if (code <= 3) return isDay ? Icons.wb_cloudy : Icons.cloud;
+  if (code == 45 || code == 48) return Icons.blur_on; // brouillard
+  if (code >= 51 && code <= 57) return Icons.grain; // bruine
+  if (code >= 61 && code <= 67) return Icons.umbrella; // pluie
+  if (code >= 71 && code <= 77) return Icons.ac_unit; // neige
+  if (code >= 80 && code <= 82) return Icons.umbrella; // averses
+  if (code >= 85 && code <= 86) return Icons.ac_unit; // averses de neige
+  if (code >= 95) return Icons.flash_on; // orage
+  return Icons.help_outline;
+}
+
 // ── Config et état par ESP32 ───────────────────────────────────────────────────
 class EspConfig {
   final String name;
@@ -1523,6 +1749,10 @@ class _HomeScreenState extends State<HomeScreen> {
   HoymilesClient?  _hoyClient;
   HoymilesOpenDtuClient? _openDtuClient;
   DateTime? _lastHoymilesRefresh; // pour imposer le rate-limit strict de 15mn
+  final OpenMeteoClient _meteoClient = OpenMeteoClient(); // stateless, une seule instance suffit
+  DateTime? _lastWeatherRefresh; // rafraîchi toutes les ~20mn (météo change lentement)
+  bool _lastWeatherFetchOk = true; // cooldown court (~1mn) après un échec, long (~20mn) après succès
+  String? _weatherExpandedDay; // null=vue compacte, 'today'/'tomorrow'=détail affiché
   bool _solarRefreshInProgress = false; // évite les cycles qui se chevauchent
   Timer? _solarTimer;
   Timer? _izyLiveModeTimer;
@@ -1763,7 +1993,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _solarTabEnabled => _solarConfig.enabled &&
       (_solarConfig.izypowerEnabled || _solarConfig.sunologyEnabled ||
           _solarConfig.apsystemsEnabled || _solarConfig.hoymilesEnabled ||
-          _solarConfig.openDtuEnabled);
+          _solarConfig.openDtuEnabled || _solarConfig.meteoEnabled);
 
   int get _totalPages =>
       (_displayMode == 'single' ? 1 : _espConfigs.length) + (_solarTabEnabled ? 1 : 0);
@@ -1875,6 +2105,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 apsystemsInverters: _solarState.apsystemsInverters,
                 apsystemsOk: _solarState.apsystemsOk,
                 apsystemsStatus: _solarState.apsystemsStatus,
+                // Idem Hoymiles Cloud / OpenDTU / météo — sans ça, elles seraient
+                // effacées à chaque cycle Izypower (10s), invisible pour Hoymiles/
+                // OpenDTU qui se re-remplissent dans le même cycle juste après,
+                // mais catastrophique pour la météo (rate-limit 20mn : resterait
+                // effacée pendant ~20mn avant le prochain vrai fetch).
+                hoymilesStations: _solarState.hoymilesStations,
+                hoymilesOk: _solarState.hoymilesOk,
+                hoymilesStatus: _solarState.hoymilesStatus,
+                openDtuInverters: _solarState.openDtuInverters,
+                openDtuOk: _solarState.openDtuOk,
+                openDtuStatus: _solarState.openDtuStatus,
+                weather: _solarState.weather,
+                weatherOk: _solarState.weatherOk,
+                weatherStatus: _solarState.weatherStatus,
                 // Partie Izypower : toujours les valeurs fraîches, y compris null
                 izySocPct: asDouble(data['battery_soc']),
                 izyBatteryPowerW: effectiveBattery,
@@ -1993,6 +2237,37 @@ class _HomeScreenState extends State<HomeScreen> {
           final msg = e.toString().replaceFirst('Exception: ', '');
           final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
           if (mounted) setState(() => _solarState = _solarState.copyWith(openDtuOk: false, openDtuStatus: short));
+        }
+      }
+      // Météo locale (Open-Meteo) — rafraîchie toutes les ~20mn en cas de
+      // succès (la météo change lentement), mais réessayée bien plus vite
+      // (~1mn) après un échec : un simple accroc réseau ponctuel ne doit pas
+      // bloquer l'affichage jusqu'au prochain cycle de 20mn.
+      if (_solarConfig.meteoEnabled && _solarConfig.meteoLat != null && _solarConfig.meteoLon != null) {
+        final now = DateTime.now();
+        final cooldown = _lastWeatherFetchOk
+            ? const Duration(minutes: 20)
+            : const Duration(minutes: 1);
+        final tooSoon = _lastWeatherRefresh != null &&
+            now.difference(_lastWeatherRefresh!) < cooldown;
+        if (!tooSoon) {
+          _lastWeatherRefresh = now;
+          try {
+            final weather = await _meteoClient.fetchWeather(
+                _solarConfig.meteoLat!, _solarConfig.meteoLon!);
+            _lastWeatherFetchOk = true;
+            if (mounted) setState(() {
+              _solarState = _solarState.copyWith(
+                weather: weather,
+                weatherOk: true, weatherStatus: TimeOfDay.now().format(context),
+              );
+            });
+          } catch (e) {
+            _lastWeatherFetchOk = false;
+            final msg = e.toString().replaceFirst('Exception: ', '');
+            final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
+            if (mounted) setState(() => _solarState = _solarState.copyWith(weatherOk: false, weatherStatus: short));
+          }
         }
       }
     } finally {
@@ -2705,6 +2980,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildSolarSummaryBlock() {
     if (!_solarTabEnabled) return const SizedBox.shrink();
     final hasValue = _solarHasAnyValue;
+    final weather = _solarState.weather;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -2712,15 +2988,39 @@ class _HomeScreenState extends State<HomeScreen> {
         border: Border.all(color: Colors.white.withOpacity(0.08)),
         borderRadius: BorderRadius.circular(14),
       ),
-      child: Row(children: [
-        Icon(Icons.wb_sunny_outlined, color: const Color(0xFFFACC15), size: 20),
-        const SizedBox(width: 10),
-        Text('PROD. PV SOLAIRE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-            letterSpacing: 1.2, color: appLabelColor)),
-        const Spacer(),
-        Text(hasValue ? '${_solarTotalPvW.round()} W' : '--',
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 18,
-                fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+      child: Column(children: [
+        Row(children: [
+          Icon(Icons.wb_sunny_outlined, color: const Color(0xFFFACC15), size: 20),
+          const SizedBox(width: 10),
+          Text('PROD. PV SOLAIRE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+              letterSpacing: 1.2, color: appLabelColor)),
+          const Spacer(),
+          Text(hasValue ? '${_solarTotalPvW.round()} W' : '--',
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 18,
+                  fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+        ]),
+        if (_solarConfig.meteoEnabled && weather != null) ...[
+          const SizedBox(height: 10),
+          Row(children: [
+            _weatherSummaryCard(
+              label: 'AUJOURD\'HUI',
+              icon: weatherIconFor(weather.currentWeatherCode ?? weather.dailyToday?.weatherCode, isDay: true),
+              temp: weather.currentTempC,
+              tempSuffix: '',
+              irradiance: _currentOrNearestIrradiance(weather.hoursToday),
+              irradianceLabel: '☀',
+            ),
+            const SizedBox(width: 8),
+            _weatherSummaryCard(
+              label: 'DEMAIN',
+              icon: weatherIconFor(weather.dailyTomorrow?.weatherCode, isDay: true),
+              temp: _daytimeAvg(weather.hoursTomorrow, (h) => h.tempC),
+              tempSuffix: ' (moy)',
+              irradiance: _dayMaxIrradiance(weather.hoursTomorrow),
+              irradianceLabel: '☀ max',
+            ),
+          ]),
+        ],
       ]),
     );
   }
@@ -2994,6 +3294,202 @@ class _HomeScreenState extends State<HomeScreen> {
       _solarState.izyOk || _solarState.sunologyOk ||
           _solarState.apsystemsOk || _solarState.hoymilesOk || _solarState.openDtuOk;
 
+  // ── Bloc météo (optionnel, affiché uniquement si activé en config) ─────────
+  Widget _buildWeatherBlock(WeatherData? weather, bool ok, String status) {
+    final loc = _solarConfig.meteoLocationName.isNotEmpty
+        ? _solarConfig.meteoLocationName : 'Coordonnées personnalisées';
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.wb_sunny_outlined, size: 16, color: Color(0xFFFACC15)),
+          const SizedBox(width: 6),
+          Expanded(child: Text('MÉTÉO · ${loc.toUpperCase()}',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                  letterSpacing: 1, color: appLabelColor))),
+          Container(width: 6, height: 6, decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: ok ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E))),
+          const SizedBox(width: 5),
+          Text(status, style: TextStyle(fontSize: 9, color: appLabelColor, fontFamily: 'monospace')),
+        ]),
+        const SizedBox(height: 10),
+        if (weather == null)
+          Text(
+            _solarConfig.meteoLat == null || _solarConfig.meteoLon == null
+                ? 'Aucune coordonnée renseignée (ville ou GPS, dans la config)'
+                : 'En attente des données météo…',
+            style: TextStyle(fontSize: 12, color: appLabelColor),
+          )
+        else ...[
+          Row(children: [
+            _weatherSummaryCard(
+              label: 'AUJOURD\'HUI',
+              icon: weatherIconFor(weather.currentWeatherCode ?? weather.dailyToday?.weatherCode, isDay: true),
+              temp: weather.currentTempC,
+              tempSuffix: '',
+              irradiance: _currentOrNearestIrradiance(weather.hoursToday),
+              irradianceLabel: '☀',
+              expanded: _weatherExpandedDay == 'today',
+              onTap: () => setState(() =>
+              _weatherExpandedDay = _weatherExpandedDay == 'today' ? null : 'today'),
+            ),
+            const SizedBox(width: 10),
+            _weatherSummaryCard(
+              label: 'DEMAIN',
+              icon: weatherIconFor(weather.dailyTomorrow?.weatherCode, isDay: true),
+              temp: _daytimeAvg(weather.hoursTomorrow, (h) => h.tempC),
+              tempSuffix: ' (moy)',
+              irradiance: _dayMaxIrradiance(weather.hoursTomorrow),
+              irradianceLabel: '☀ max',
+              expanded: _weatherExpandedDay == 'tomorrow',
+              onTap: () => setState(() =>
+              _weatherExpandedDay = _weatherExpandedDay == 'tomorrow' ? null : 'tomorrow'),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text('☀ = irradiance solaire (W/m²) — indicateur de prod. PV attendue',
+              style: TextStyle(fontSize: 9, color: appLabelColor)),
+          if (_weatherExpandedDay != null) ...[
+            const SizedBox(height: 12),
+            Text(_weatherExpandedDay == 'today' ? 'DÉTAIL · AUJOURD\'HUI' : 'DÉTAIL · DEMAIN',
+                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+                    letterSpacing: 1, color: appLabelColor)),
+            const SizedBox(height: 6),
+            _buildHourlyStrip(_weatherExpandedDay == 'today' ? weather.hoursToday : weather.hoursTomorrow),
+          ],
+          if (weather.hoursToday.isEmpty && weather.hoursTomorrow.isEmpty && weather.currentTempC == null)
+            Text('Données reçues mais vides — vérifier la config des paramètres météo',
+                style: TextStyle(fontSize: 11, color: appLabelColor)),
+        ],
+      ]),
+    );
+  }
+
+  // Moyenne d'une grandeur horaire sur les heures de JOUR uniquement (la nuit
+  // n'a pas d'intérêt pour la température ressentie).
+  double? _daytimeAvg(List<WeatherHourPoint> hours, double? Function(WeatherHourPoint) selector) {
+    final vals = hours.where((h) => h.isDay).map(selector).whereType<double>().toList();
+    if (vals.isEmpty) return null;
+    return vals.reduce((a, b) => a + b) / vals.length;
+  }
+
+  // Irradiance de l'heure la plus proche de maintenant (pour "aujourd'hui").
+  double? _currentOrNearestIrradiance(List<WeatherHourPoint> hoursToday) {
+    if (hoursToday.isEmpty) return null;
+    final now = DateTime.now();
+    var closest = hoursToday.first;
+    var minDiff = closest.time.difference(now).abs();
+    for (final h in hoursToday) {
+      final diff = h.time.difference(now).abs();
+      if (diff < minDiff) { minDiff = diff; closest = h; }
+    }
+    return closest.shortwaveRadiation;
+  }
+
+  // Irradiance maximale de la journée (heures de jour), représentative du pic
+  // de prod. PV attendu — plus parlant qu'une moyenne diluée par matin/soir.
+  double? _dayMaxIrradiance(List<WeatherHourPoint> hours) {
+    final vals = hours.where((h) => h.isDay).map((h) => h.shortwaveRadiation).whereType<double>().toList();
+    if (vals.isEmpty) return null;
+    return vals.reduce((a, b) => a > b ? a : b);
+  }
+
+  // Carte résumé compacte (aujourd'hui ou demain) — tap pour développer le
+  // détail heure par heure juste en dessous.
+  Widget _weatherSummaryCard({
+    required String label, required IconData icon,
+    required double? temp, required String tempSuffix,
+    required double? irradiance, required String irradianceLabel,
+    bool expanded = false, VoidCallback? onTap,
+  }) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+          decoration: BoxDecoration(
+            color: expanded ? const Color(0xFFFACC15).withOpacity(0.08) : const Color(0xFF0A0F1A),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: expanded
+                ? const Color(0xFFFACC15).withOpacity(0.4) : Colors.white.withOpacity(0.08)),
+          ),
+          child: Column(children: [
+            Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                letterSpacing: 1, color: appLabelColor)),
+            const SizedBox(height: 6),
+            Icon(icon, color: const Color(0xFFFACC15), size: 28),
+            const SizedBox(height: 6),
+            Text(temp != null ? '${temp.round()}°C$tempSuffix' : '--',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
+                    color: Color(0xFFE8EAF0))),
+            const SizedBox(height: 2),
+            Text(irradiance != null ? '$irradianceLabel ${irradiance.round()} W/m²' : '$irradianceLabel --',
+                style: TextStyle(fontSize: 10, color: appLabelColor)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // Bande horaire scrollable : icône + température + barre d'irradiance
+  // solaire (proxy standard de prod. PV attendue, 800 W/m² ≈ plein soleil).
+  Widget _buildHourlyStrip(List<WeatherHourPoint> hours) {
+    // Masque les heures déjà passées de la journée en cours pour rester utile
+    final now = DateTime.now();
+    final visible = hours.where((h) => h.time.isAfter(now.subtract(const Duration(hours: 1)))).toList();
+    if (visible.isEmpty) return const SizedBox.shrink();
+    return SizedBox(
+      height: 92,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: visible.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        itemBuilder: (context, i) {
+          final h = visible[i];
+          final radFrac = ((h.shortwaveRadiation ?? 0) / 800).clamp(0.0, 1.0);
+          return SizedBox(
+            width: 42,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('${h.time.hour.toString().padLeft(2, '0')}h',
+                  style: TextStyle(fontSize: 10, color: appLabelColor)),
+              const SizedBox(height: 4),
+              Icon(weatherIconFor(h.weatherCode, isDay: h.isDay),
+                  size: 20, color: const Color(0xFFFACC15)),
+              const SizedBox(height: 4),
+              Text(h.tempC != null ? '${h.tempC!.round()}°' : '--',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: Color(0xFFE8EAF0))),
+              const SizedBox(height: 4),
+              Container(
+                width: 24, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+                child: FractionallySizedBox(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: radFrac,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFACC15),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+
   // ── Page suivi solaire (Izypower / Sunology) ────────────────────────────────
   Widget _buildSolarPage(BuildContext context) {
     final s = _solarState;
@@ -3073,12 +3569,19 @@ class _HomeScreenState extends State<HomeScreen> {
                 letterSpacing: 2, color: appLabelColor)),
         const SizedBox(height: 10),
         PowerGaugeWidget(value: totalPv, hasValue: _solarHasAnyValue,
-            maxValue: _solarConfig.totalCapacityW),
+            maxValue: _solarConfig.totalCapacityW, size: 160),
         if (dailyTotalKwh != null) ...[
           const SizedBox(height: 4),
           Text('${dailyTotalKwh.toStringAsFixed(2)} kWh aujourd\'hui',
               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
                   color: appLabelColor)),
+        ],
+        // Bloc météo — entièrement optionnel, masqué si non activé en config.
+        // Affiché même en cas d'échec (avec le statut d'erreur) plutôt que
+        // silencieusement masqué, pour pouvoir diagnostiquer un souci éventuel.
+        if (_solarConfig.meteoEnabled) ...[
+          const SizedBox(height: 16),
+          _buildWeatherBlock(s.weather, s.weatherOk, s.weatherStatus),
         ],
         const SizedBox(height: 20),
 
@@ -4592,6 +5095,12 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late TextEditingController _openDtuUrlCtrl;
   late String _openDtuMode; // 'direct' ou 'router'
   late String _openDtuRouterEspName;
+  late bool _meteoEnabled;
+  late TextEditingController _meteoCityCtrl, _meteoLatCtrl, _meteoLonCtrl;
+  late String _meteoLocationName;
+  bool _meteoSearching = false;
+  String? _meteoSearchError;
+  List<OpenMeteoGeocodingResult>? _meteoResults;
   late TextEditingController _totalCapacityCtrl;
   bool _sunoTesting = false, _izyTesting = false, _apTesting = false, _hoyTesting = false, _openDtuTesting = false;
   bool _izyDiscovering = false;
@@ -4650,6 +5159,11 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _hoyUserCtrl      = TextEditingController(text: sc.hoymilesUsername);
     _hoyPwdCtrl       = TextEditingController(text: sc.hoymilesPassword);
     _openDtuUrlCtrl   = TextEditingController(text: sc.openDtuDirectUrl);
+    _meteoEnabled     = sc.meteoEnabled;
+    _meteoLocationName = sc.meteoLocationName;
+    _meteoCityCtrl    = TextEditingController();
+    _meteoLatCtrl     = TextEditingController(text: sc.meteoLat?.toString() ?? '');
+    _meteoLonCtrl     = TextEditingController(text: sc.meteoLon?.toString() ?? '');
     _totalCapacityCtrl = TextEditingController(
         text: sc.totalCapacityW > 0 ? sc.totalCapacityW.round().toString() : '');
     _ctrls = widget.currentConfigs.map((c) => {
@@ -4687,6 +5201,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _apUserCtrl.dispose(); _apPwdCtrl.dispose();
     _hoyUserCtrl.dispose(); _hoyPwdCtrl.dispose();
     _openDtuUrlCtrl.dispose();
+    _meteoCityCtrl.dispose(); _meteoLatCtrl.dispose(); _meteoLonCtrl.dispose();
     _totalCapacityCtrl.dispose();
     super.dispose();
   }
@@ -4962,6 +5477,39 @@ class _ConfigSheetState extends State<ConfigSheet> {
         _openDtuTesting = false;
       });
     }
+  }
+
+  // Géocodage (une fois, à la config) — les coordonnées obtenues sont ensuite
+  // stockées et jamais re-résolues au fil des rafraîchissements météo.
+  Future<void> _searchMeteoCity() async {
+    final query = _meteoCityCtrl.text.trim();
+    if (query.isEmpty) return;
+    setState(() { _meteoSearching = true; _meteoSearchError = null; _meteoResults = null; });
+    try {
+      final client = OpenMeteoClient();
+      final results = await client.geocode(query);
+      setState(() {
+        _meteoResults = results;
+        _meteoSearching = false;
+        if (results.isEmpty) _meteoSearchError = 'Aucun résultat trouvé';
+      });
+    } catch (_) {
+      setState(() {
+        _meteoSearching = false;
+        _meteoSearchError = 'Erreur de recherche';
+      });
+    }
+  }
+
+  void _selectMeteoResult(OpenMeteoGeocodingResult r) {
+    setState(() {
+      _meteoLatCtrl.text = r.latitude.toStringAsFixed(4);
+      _meteoLonCtrl.text = r.longitude.toStringAsFixed(4);
+      _meteoLocationName = r.admin1 != null && r.admin1!.isNotEmpty
+          ? '${r.name}, ${r.admin1}' : r.name;
+      _meteoResults = null;
+      _meteoCityCtrl.clear();
+    });
   }
 
   void _moveApInverter(int index, int delta) {
@@ -5856,6 +6404,111 @@ class _ConfigSheetState extends State<ConfigSheet> {
                   ),
                 ],
               ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // Météo locale (Open-Meteo) — gratuit, sans clé API
+              CheckboxListTile(
+                value: _meteoEnabled,
+                onChanged: (v) => setState(() => _meteoEnabled = v!),
+                title: const Text('Météo locale',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                subtitle: const Text('Prévisions Open-Meteo, gratuit et sans compte',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                activeColor: const Color(0xFFFACC15),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_meteoEnabled) ...[
+                const SizedBox(height: 6),
+                if (_meteoLocationName.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0F1A),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.place_outlined, size: 16, color: Color(0xFFFACC15)),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(_meteoLocationName,
+                          style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)))),
+                    ]),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                // Recherche par ville (géocodage une fois, coordonnées stockées ensuite)
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _meteoCityCtrl,
+                      style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                      decoration: _inputDeco('Rechercher une ville'),
+                      onSubmitted: (_) => _searchMeteoCity(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    onPressed: _meteoSearching ? null : _searchMeteoCity,
+                    icon: _meteoSearching
+                        ? const SizedBox(width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFFACC15)))
+                        : const Icon(Icons.search, color: Color(0xFFFACC15)),
+                  ),
+                ]),
+                if (_meteoSearchError != null) ...[
+                  const SizedBox(height: 4),
+                  Text(_meteoSearchError!,
+                      style: const TextStyle(fontSize: 11, color: Color(0xFFF43F5E))),
+                ],
+                if (_meteoResults != null && _meteoResults!.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0F1A),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    ),
+                    child: Column(children: [
+                      for (final r in _meteoResults!)
+                        ListTile(
+                          dense: true,
+                          title: Text(r.name,
+                              style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                          subtitle: Text([r.admin1, r.country].where((s) => s != null && s.isNotEmpty).join(', '),
+                              style: const TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                          onTap: () => _selectMeteoResult(r),
+                        ),
+                    ]),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Text('Ou coordonnées GPS directes (plus précis pour votre installation)',
+                    style: TextStyle(fontSize: 10, color: appLabelColor)),
+                const SizedBox(height: 4),
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _meteoLatCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                      decoration: _inputDeco('Latitude'),
+                      onChanged: (_) => setState(() => _meteoLocationName = ''),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _meteoLonCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                      decoration: _inputDeco('Longitude'),
+                      onChanged: (_) => setState(() => _meteoLocationName = ''),
+                    ),
+                  ),
+                ]),
+              ],
             ],
             const SizedBox(height: 16),
 
@@ -5971,6 +6624,13 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     openDtuMode: _openDtuMode,
                     openDtuDirectUrl: _openDtuUrlCtrl.text.trim(),
                     openDtuRouterEspName: _openDtuRouterEspName,
+                    meteoEnabled: _meteoEnabled,
+                    // Tolère la virgule décimale (clavier numérique en
+                    // locale FR) en plus du point — sinon un double.tryParse
+                    // strict échoue silencieusement sur "48,6961" → null.
+                    meteoLat: double.tryParse(_meteoLatCtrl.text.trim().replaceAll(',', '.')),
+                    meteoLon: double.tryParse(_meteoLonCtrl.text.trim().replaceAll(',', '.')),
+                    meteoLocationName: _meteoLocationName,
                     totalCapacityW: double.tryParse(_totalCapacityCtrl.text.trim()) ?? 0,
                   );
                   await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor, solarConfig);
