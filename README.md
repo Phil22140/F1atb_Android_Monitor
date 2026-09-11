@@ -80,6 +80,8 @@ v4.8.9 - Compatibilité panneau de config avec Samsung S10
 
 v4.9.0 - Correction Bug de test de connexion
 
+v4.10.0 - Météo locale (Open-Meteo), mode routeur F1ATB confirmé, correctifs UI et jauges"
+
 --------
 
 
