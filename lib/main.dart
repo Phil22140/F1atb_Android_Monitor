@@ -12,7 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/export.dart' show
 RSAPublicKey, PKCS1Encoding, RSAEngine, PublicKeyParameter,
 CBCBlockCipher, AESEngine, ParametersWithIV, KeyParameter,
-MD5Digest, SHA256Digest;
+MD5Digest, SHA256Digest, HMac;
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Client HTTP natif, plus permissif que le package http ─────────────────────
@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.10.0';
+const String appVersion = '4.12.1';
 const String RS = '\x1e'; // Record Separator
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
@@ -287,6 +287,10 @@ class SolarConfig {
   final bool meteoEnabled;
   final double? meteoLat, meteoLon;
   final String meteoLocationName; // nom affiché (ville géocodée, ou "coordonnées perso")
+  final bool apEmaEnabled;
+  final String apEmaAppId, apEmaAppSecret, apEmaSid;
+  final bool apEcuEnabled;
+  final String apEcuIp;
   final double totalCapacityW; // puissance crête installée totale (W), pour calibrer la jauge
   const SolarConfig({
     this.enabled = false,
@@ -313,6 +317,12 @@ class SolarConfig {
     this.meteoLat,
     this.meteoLon,
     this.meteoLocationName = '',
+    this.apEmaEnabled = false,
+    this.apEmaAppId = '',
+    this.apEmaAppSecret = '',
+    this.apEmaSid = '',
+    this.apEcuEnabled = false,
+    this.apEcuIp = '',
     this.totalCapacityW = 0,
   });
 
@@ -324,6 +334,8 @@ class SolarConfig {
     bool? hoymilesEnabled, String? hoymilesUsername, String? hoymilesPassword,
     bool? openDtuEnabled, String? openDtuMode, String? openDtuDirectUrl, String? openDtuRouterEspName,
     bool? meteoEnabled, double? meteoLat, double? meteoLon, String? meteoLocationName,
+    bool? apEmaEnabled, String? apEmaAppId, String? apEmaAppSecret, String? apEmaSid,
+    bool? apEcuEnabled, String? apEcuIp,
     double? totalCapacityW,
   }) {
     return SolarConfig(
@@ -351,6 +363,12 @@ class SolarConfig {
       meteoLat: meteoLat ?? this.meteoLat,
       meteoLon: meteoLon ?? this.meteoLon,
       meteoLocationName: meteoLocationName ?? this.meteoLocationName,
+      apEmaEnabled: apEmaEnabled ?? this.apEmaEnabled,
+      apEmaAppId: apEmaAppId ?? this.apEmaAppId,
+      apEmaAppSecret: apEmaAppSecret ?? this.apEmaAppSecret,
+      apEmaSid: apEmaSid ?? this.apEmaSid,
+      apEcuEnabled: apEcuEnabled ?? this.apEcuEnabled,
+      apEcuIp: apEcuIp ?? this.apEcuIp,
       totalCapacityW: totalCapacityW ?? this.totalCapacityW,
     );
   }
@@ -380,6 +398,12 @@ class SolarConfig {
     'meteo_lat': meteoLat,
     'meteo_lon': meteoLon,
     'meteo_location_name': meteoLocationName,
+    'apema_enabled': apEmaEnabled,
+    'apema_app_id': apEmaAppId,
+    'apema_app_secret': apEmaAppSecret,
+    'apema_sid': apEmaSid,
+    'apecu_enabled': apEcuEnabled,
+    'apecu_ip': apEcuIp,
     'total_capacity_w': totalCapacityW,
   };
 
@@ -408,6 +432,12 @@ class SolarConfig {
     meteoLat: (j['meteo_lat'] as num?)?.toDouble(),
     meteoLon: (j['meteo_lon'] as num?)?.toDouble(),
     meteoLocationName: j['meteo_location_name'] as String? ?? '',
+    apEmaEnabled: j['apema_enabled'] as bool? ?? false,
+    apEmaAppId: j['apema_app_id'] as String? ?? '',
+    apEmaAppSecret: j['apema_app_secret'] as String? ?? '',
+    apEmaSid: j['apema_sid'] as String? ?? '',
+    apEcuEnabled: j['apecu_enabled'] as bool? ?? false,
+    apEcuIp: j['apecu_ip'] as String? ?? '',
     totalCapacityW: (j['total_capacity_w'] as num?)?.toDouble() ?? 0,
   );
 }
@@ -449,6 +479,14 @@ class SolarState {
   final WeatherData? weather;
   final bool weatherOk;
   final String weatherStatus;
+  // APsystems via EMA OpenAPI — une ou plusieurs ECU
+  final List<ApEmaEcu> apEmaEcus;
+  final bool apEmaOk;
+  final String apEmaStatus;
+  // APsystems ECU local (protocole binaire, réseau local)
+  final ApEcuData? apEcuData;
+  final bool apEcuOk;
+  final String apEcuStatus;
 
   const SolarState({
     this.sunologyPvW, this.sunologyDayTxt, this.sunologyWeekTxt,
@@ -469,6 +507,8 @@ class SolarState {
     this.openDtuInverters = const [],
     this.openDtuOk = false, this.openDtuStatus = 'connexion…',
     this.weather, this.weatherOk = false, this.weatherStatus = 'connexion…',
+    this.apEmaEcus = const [], this.apEmaOk = false, this.apEmaStatus = 'connexion…',
+    this.apEcuData, this.apEcuOk = false, this.apEcuStatus = 'connexion…',
   });
 
   SolarState copyWith({
@@ -490,6 +530,8 @@ class SolarState {
     List<OpenDtuInverter>? openDtuInverters,
     bool? openDtuOk, String? openDtuStatus,
     WeatherData? weather, bool? weatherOk, String? weatherStatus,
+    List<ApEmaEcu>? apEmaEcus, bool? apEmaOk, String? apEmaStatus,
+    ApEcuData? apEcuData, bool? apEcuOk, String? apEcuStatus,
   }) {
     return SolarState(
       sunologyPvW: sunologyPvW ?? this.sunologyPvW,
@@ -533,6 +575,12 @@ class SolarState {
       weather: weather ?? this.weather,
       weatherOk: weatherOk ?? this.weatherOk,
       weatherStatus: weatherStatus ?? this.weatherStatus,
+      apEmaEcus: apEmaEcus ?? this.apEmaEcus,
+      apEmaOk: apEmaOk ?? this.apEmaOk,
+      apEmaStatus: apEmaStatus ?? this.apEmaStatus,
+      apEcuData: apEcuData ?? this.apEcuData,
+      apEcuOk: apEcuOk ?? this.apEcuOk,
+      apEcuStatus: apEcuStatus ?? this.apEcuStatus,
     );
   }
 }
@@ -1605,6 +1653,349 @@ IconData weatherIconFor(int? code, {bool isDay = true}) {
   return Icons.help_outline;
 }
 
+// ── Client APsystems via EMA OpenAPI (API officielle, différente d'EasyPower/EZ1) ──
+// Installations résidentielles classiques (ECU + onduleurs YC/QS/QT), par opposition
+// aux kits balcon EZ1 déjà gérés via ApSystemsClient (app AP EasyPower). API officielle
+// documentée — auth par signature HMAC-SHA256 par requête (pas de token qui expire).
+// Piège documenté : RequestPath (pour la signature) = UNIQUEMENT le dernier segment
+// du chemin, jamais la query string ni le chemin complet.
+// Quota observé ~1000 appels/mois → rafraîchissement volontairement très espacé
+// (voir rate-limit dans _refreshSolar), à l'image de Hoymiles Cloud.
+
+class ApEmaEcu {
+  final String eid;
+  final double? powerW;       // approximation "instantané" = dernier point de la
+  // courbe minute-par-minute (pas de endpoint "power now" direct)
+  final double? todayKwh, monthKwh, yearKwh, lifetimeKwh;
+  const ApEmaEcu({
+    required this.eid, this.powerW,
+    this.todayKwh, this.monthKwh, this.yearKwh, this.lifetimeKwh,
+  });
+}
+
+class ApEmaClient {
+  static const String baseUrl = 'https://api.apsystemsema.com:9282';
+  final String appId, appSecret, sid;
+  ApEmaClient({required this.appId, required this.appSecret, required this.sid});
+
+  String _hex(List<int> bytes) =>
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  String _hmacSha256Base64(String stringToSign) {
+    final hmac = HMac(SHA256Digest(), 64)
+      ..init(KeyParameter(Uint8List.fromList(utf8.encode(appSecret))));
+    final digest = hmac.process(Uint8List.fromList(utf8.encode(stringToSign)));
+    return base64.encode(digest);
+  }
+
+  // UUID v4 sans dépendance externe (le manuel demande juste 32 caractères).
+  String _uuidV4() {
+    final rnd = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rnd.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0F) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3F) | 0x80; // variant
+    return _hex(bytes);
+  }
+
+  // path = chemin SANS query string (la query ne doit jamais entrer dans le
+  // calcul de signature, seul le dernier segment du path compte).
+  Map<String, String> _authHeaders(String path) {
+    final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+    final nonce = _uuidV4();
+    final requestPath = path.split('/').last; // piège documenté : dernier segment uniquement
+    final stringToSign = '$timestamp/$nonce/$appId/$requestPath/GET/HmacSHA256';
+    return {
+      'X-CA-AppId': appId,
+      'X-CA-Timestamp': timestamp,
+      'X-CA-Nonce': nonce,
+      'X-CA-Signature-Method': 'HmacSHA256',
+      'X-CA-Signature': _hmacSha256Base64(stringToSign),
+    };
+  }
+
+  Future<Map<String, dynamic>> _get(String path, [Map<String, String>? query]) async {
+    final client = HttpClient();
+    try {
+      final uri = Uri.parse('$baseUrl$path').replace(queryParameters: query);
+      final req = await client.getUrl(uri);
+      _authHeaders(path).forEach((k, v) => req.headers.set(k, v));
+      final resp = await req.close().timeout(const Duration(seconds: 12));
+      final text = await resp.transform(utf8.decoder).join();
+      final json = jsonDecode(text) as Map<String, dynamic>;
+      final code = json['code'];
+      if (code != null && code != 0) {
+        throw Exception('Erreur EMA $code : ${json['msg'] ?? json['message'] ?? ''}');
+      }
+      return json;
+    } finally {
+      client.close();
+    }
+  }
+
+  // Liste des ECU (eid) du système — parcours défensif de la forme imbriquée,
+  // la doc ne montre pas d'exemple JSON exact pour cet endpoint.
+  Future<List<String>> _fetchEcuIds() async {
+    final json = await _get('/user/api/v2/systems/inverters/$sid');
+    final ids = <String>{};
+    void scan(dynamic node) {
+      if (node is Map) {
+        final eid = node['eid'];
+        if (eid != null) ids.add(eid.toString());
+        for (final v in node.values) scan(v);
+      } else if (node is List) {
+        for (final v in node) scan(v);
+      }
+    }
+    scan(json['data']);
+    return ids.toList();
+  }
+
+  Future<ApEmaEcu> _fetchEcuData(String eid) async {
+    double? powerW, todayKwh, monthKwh, yearKwh, lifetimeKwh;
+    try {
+      final summary = await _get('/user/api/v2/systems/$sid/devices/ecu/summary/$eid');
+      final d = (summary['data'] as Map?)?.cast<String, dynamic>();
+      todayKwh = asDouble(d?['today']);
+      monthKwh = asDouble(d?['month']);
+      yearKwh = asDouble(d?['year']);
+      lifetimeKwh = asDouble(d?['lifetime']);
+    } catch (_) {
+      // Échec du résumé : on tente quand même la courbe de puissance ci-dessous
+    }
+    try {
+      final now = DateTime.now();
+      final dateStr = '${now.year.toString().padLeft(4, '0')}-'
+          '${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+      final energy = await _get(
+          '/user/api/v2/systems/$sid/devices/ecu/energy/$eid',
+          {'energy_level': 'minutely', 'date_range': dateStr});
+      final d = (energy['data'] as Map?)?.cast<String, dynamic>();
+      final powerList = d?['power'] as List?;
+      if (powerList != null && powerList.isNotEmpty) {
+        powerW = asDouble(powerList.last);
+      }
+    } catch (_) {
+      // Échec de la courbe : on garde quand même le résumé jour/mois/année ci-dessus
+    }
+    return ApEmaEcu(eid: eid, powerW: powerW,
+        todayKwh: todayKwh, monthKwh: monthKwh, yearKwh: yearKwh, lifetimeKwh: lifetimeKwh);
+  }
+
+  Future<List<ApEmaEcu>> fetchAll() async {
+    final eids = await _fetchEcuIds();
+    final result = <ApEmaEcu>[];
+    for (final eid in eids) {
+      result.add(await _fetchEcuData(eid));
+    }
+    return result;
+  }
+}
+
+// ── Client APsystems ECU local (protocole binaire brut, port 8899) ─────────────
+// 3e variante APsystems, différente d'EasyPower (app AP EasyPower, kits EZ1) et
+// d'EMA (API cloud officielle) — communication TCP directe avec l'ECU sur le
+// réseau local, sans aucun identifiant. Utilisée par la communauté Home Assistant
+// (HAEdwin/homeassistant-apsystems_ecu_reader). Réseau local uniquement pour
+// l'instant (comme OpenDTU en mode direct).
+
+class ApEcuInverter {
+  final String uid;
+  final bool online;
+  final String typeCode;
+  final double? tempC;
+  final double? freqHz;
+  final List<double> channelPowerW;
+  final List<double> channelVoltageV;
+  const ApEcuInverter({
+    required this.uid, required this.online, required this.typeCode,
+    this.tempC, this.freqHz,
+    this.channelPowerW = const [], this.channelVoltageV = const [],
+  });
+}
+
+class ApEcuData {
+  final String ecuId;
+  final double? lifetimeKwh;
+  final double? currentPowerW;
+  final double? todayKwh;
+  final int? inverterCount, inverterOnlineCount;
+  final String? firmwareVersion;
+  final List<ApEcuInverter> inverters;
+  const ApEcuData({
+    required this.ecuId, this.lifetimeKwh, this.currentPowerW, this.todayKwh,
+    this.inverterCount, this.inverterOnlineCount, this.firmwareVersion,
+    this.inverters = const [],
+  });
+}
+
+class ApEcuLocalClient {
+  final String ip;
+  const ApEcuLocalClient({required this.ip});
+
+  int _beInt(Uint8List d, int off, int len) {
+    var r = 0;
+    for (var i = 0; i < len; i++) { r = (r << 8) | d[off + i]; }
+    return r;
+  }
+
+  String _ascii(Uint8List d, int off, int len) {
+    if (off < 0 || off + len > d.length) return '';
+    return utf8.decode(d.sublist(off, off + len), allowMalformed: true);
+  }
+
+  String _hex(Uint8List d, int off, int len) {
+    if (off < 0 || off + len > d.length) return '';
+    return d.sublist(off, off + len).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  // Ferme/rouvre une connexion TCP à chaque commande (imposé par certains
+  // modèles d'ECU, appliqué par sécurité à tous selon l'implémentation de
+  // référence) — accumule les octets jusqu'à ce que le checksum annoncé
+  // (offset 5, 4 caractères ASCII) indique que la trame est complète.
+  Future<Uint8List> _sendCommand(String command) async {
+    Socket? socket;
+    StreamSubscription? sub;
+    try {
+      socket = await Socket.connect(ip, 8899, timeout: const Duration(seconds: 8));
+      socket.add(utf8.encode(command));
+      await socket.flush();
+
+      final buffer = <int>[];
+      int? expectedLen;
+      final completer = Completer<Uint8List>();
+      sub = socket.listen(
+            (data) {
+          buffer.addAll(data);
+          if (expectedLen == null && buffer.length >= 9) {
+            expectedLen = int.tryParse(_ascii(Uint8List.fromList(buffer), 5, 4));
+          }
+          if (expectedLen != null && buffer.length >= expectedLen! + 1 && !completer.isCompleted) {
+            completer.complete(Uint8List.fromList(buffer));
+          }
+        },
+        onDone: () { if (!completer.isCompleted) completer.complete(Uint8List.fromList(buffer)); },
+        onError: (e) { if (!completer.isCompleted) completer.completeError(e); },
+        cancelOnError: true,
+      );
+      return await completer.future.timeout(const Duration(seconds: 8));
+    } finally {
+      await sub?.cancel();
+      socket?.destroy();
+    }
+  }
+
+  bool _validate(Uint8List d) {
+    if (d.length < 10) return false;
+    if (_ascii(d, 0, 3) != 'APS') return false;
+    if (_ascii(d, d.length - 4, 3) != 'END') return false;
+    final checksum = int.tryParse(_ascii(d, 5, 4));
+    return checksum != null && d.length - 1 == checksum;
+  }
+
+  ApEcuData? _parseBase(Uint8List d) {
+    if (d.length < 39 || _ascii(d, 9, 4) != '0001') return null;
+    final ecuId = _ascii(d, 13, 12);
+    final variant = _ascii(d, 25, 2);
+    final lifetimeRaw = _beInt(d, 27, 4);
+    final powerRaw = _beInt(d, 31, 4);
+    final todayRaw = _beInt(d, 35, 4);
+
+    int? invCount, invOnline;
+    String? fw;
+    if (variant == '01' && d.length >= 55) {
+      invCount = _beInt(d, 46, 2);
+      invOnline = _beInt(d, 48, 2);
+      final vsl = int.tryParse(_ascii(d, 52, 3)) ?? 0;
+      if (d.length >= 55 + vsl) fw = _ascii(d, 55, vsl);
+    } else if (variant == '02' && d.length >= 52) {
+      invCount = _beInt(d, 39, 2);
+      invOnline = _beInt(d, 41, 2);
+      final vsl = int.tryParse(_ascii(d, 49, 3)) ?? 0;
+      if (d.length >= 52 + vsl) fw = _ascii(d, 52, vsl);
+    }
+
+    return ApEcuData(
+      ecuId: ecuId,
+      lifetimeKwh: lifetimeRaw / 10,
+      currentPowerW: powerRaw.toDouble(),
+      todayKwh: todayRaw / 100,
+      inverterCount: invCount, inverterOnlineCount: invOnline,
+      firmwareVersion: fw,
+    );
+  }
+
+  List<ApEcuInverter> _parseInverters(Uint8List d) {
+    final result = <ApEcuInverter>[];
+    if (d.length < 26 || _ascii(d, 9, 4) != '0002') return result;
+    final count = _beInt(d, 17, 2);
+
+    var cnt2 = 26;
+    for (var i = 0; i < count; i++) {
+      if (cnt2 + 9 > d.length) break;
+      final uid = _hex(d, cnt2, 6);
+      final online = d[cnt2 + 6] == 1;
+      final typeCode = _ascii(d, cnt2 + 7, 2);
+
+      int channels, blockLen;
+      switch (typeCode) {
+        case '01': case '04': channels = 2; blockLen = 21; break;
+        case '02': case '05': channels = 4; blockLen = 27; break;
+        case '03': channels = 4; blockLen = 23; break;
+        default: channels = 0; blockLen = 9; break;
+      }
+
+      double? temp, freq;
+      final powers = <double>[];
+      final voltages = <double>[];
+      if (online && channels > 0 && cnt2 + blockLen <= d.length) {
+        temp = _beInt(d, cnt2 + 11, 2) - 100.0;
+        freq = _beInt(d, cnt2 + 9, 2) / 10.0;
+        var pOff = cnt2 + 13;
+        for (var c = 0; c < channels; c++) {
+          if (pOff + 4 > d.length) break;
+          powers.add(_beInt(d, pOff, 2).toDouble());
+          voltages.add(_beInt(d, pOff + 2, 2).toDouble());
+          pOff += 4;
+        }
+      }
+
+      result.add(ApEcuInverter(
+        uid: uid, online: online, typeCode: typeCode,
+        tempC: online ? temp : null, freqHz: online ? freq : null,
+        channelPowerW: powers, channelVoltageV: voltages,
+      ));
+      cnt2 += blockLen;
+    }
+    return result;
+  }
+
+  Future<ApEcuData> fetchAll() async {
+    final baseRaw = await _sendCommand('APS1100160001END\n');
+    if (!_validate(baseRaw)) throw Exception('Trame ECU invalide (checksum/signature)');
+    final base = _parseBase(baseRaw);
+    if (base == null) throw Exception('Impossible de lire les infos ECU');
+
+    List<ApEcuInverter> inverters = const [];
+    try {
+      final invRaw = await _sendCommand('APS1100280002${base.ecuId}END\n');
+      if (_validate(invRaw)) inverters = _parseInverters(invRaw);
+    } catch (_) {
+      // Échec de la requête onduleurs : on garde quand même les infos ECU de base
+    }
+
+    return ApEcuData(
+      ecuId: base.ecuId,
+      lifetimeKwh: base.lifetimeKwh,
+      currentPowerW: base.currentPowerW,
+      todayKwh: base.todayKwh,
+      inverterCount: base.inverterCount,
+      inverterOnlineCount: base.inverterOnlineCount,
+      firmwareVersion: base.firmwareVersion,
+      inverters: inverters,
+    );
+  }
+}
+
 // ── Config et état par ESP32 ───────────────────────────────────────────────────
 class EspConfig {
   final String name;
@@ -1753,6 +2144,9 @@ class _HomeScreenState extends State<HomeScreen> {
   DateTime? _lastWeatherRefresh; // rafraîchi toutes les ~20mn (météo change lentement)
   bool _lastWeatherFetchOk = true; // cooldown court (~1mn) après un échec, long (~20mn) après succès
   String? _weatherExpandedDay; // null=vue compacte, 'today'/'tomorrow'=détail affiché
+  ApEmaClient? _apEmaClient;
+  ApEcuLocalClient? _apEcuClient;
+  DateTime? _lastApEmaRefresh; // rafraîchi toutes les ~60mn (quota API ~1000 appels/mois)
   bool _solarRefreshInProgress = false; // évite les cycles qui se chevauchent
   Timer? _solarTimer;
   Timer? _izyLiveModeTimer;
@@ -1988,12 +2382,22 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       _openDtuClient = null;
     }
+    _apEmaClient = (_solarConfig.enabled && _solarConfig.apEmaEnabled &&
+        _solarConfig.apEmaAppId.isNotEmpty && _solarConfig.apEmaSid.isNotEmpty)
+        ? ApEmaClient(appId: _solarConfig.apEmaAppId, appSecret: _solarConfig.apEmaAppSecret,
+        sid: _solarConfig.apEmaSid)
+        : null;
+    _apEcuClient = (_solarConfig.enabled && _solarConfig.apEcuEnabled &&
+        _solarConfig.apEcuIp.isNotEmpty)
+        ? ApEcuLocalClient(ip: _solarConfig.apEcuIp)
+        : null;
   }
 
   bool get _solarTabEnabled => _solarConfig.enabled &&
       (_solarConfig.izypowerEnabled || _solarConfig.sunologyEnabled ||
           _solarConfig.apsystemsEnabled || _solarConfig.hoymilesEnabled ||
-          _solarConfig.openDtuEnabled || _solarConfig.meteoEnabled);
+          _solarConfig.openDtuEnabled || _solarConfig.meteoEnabled ||
+          _solarConfig.apEmaEnabled || _solarConfig.apEcuEnabled);
 
   int get _totalPages =>
       (_displayMode == 'single' ? 1 : _espConfigs.length) + (_solarTabEnabled ? 1 : 0);
@@ -2119,6 +2523,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 weather: _solarState.weather,
                 weatherOk: _solarState.weatherOk,
                 weatherStatus: _solarState.weatherStatus,
+                // Idem APsystems EMA — rate-limit 60mn, encore plus critique à
+                // préserver que la météo (20mn) sans quoi elle ne se réafficherait
+                // quasiment jamais correctement.
+                apEmaEcus: _solarState.apEmaEcus,
+                apEmaOk: _solarState.apEmaOk,
+                apEmaStatus: _solarState.apEmaStatus,
+                // Idem APsystems ECU local — même si pas de rate-limit ici (local,
+                // rafraîchi à chaque cycle comme OpenDTU), la cohérence de ce
+                // bloc impose de tout lister explicitement pour éviter tout oubli.
+                apEcuData: _solarState.apEcuData,
+                apEcuOk: _solarState.apEcuOk,
+                apEcuStatus: _solarState.apEcuStatus,
                 // Partie Izypower : toujours les valeurs fraîches, y compris null
                 izySocPct: asDouble(data['battery_soc']),
                 izyBatteryPowerW: effectiveBattery,
@@ -2268,6 +2684,47 @@ class _HomeScreenState extends State<HomeScreen> {
             final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
             if (mounted) setState(() => _solarState = _solarState.copyWith(weatherOk: false, weatherStatus: short));
           }
+        }
+      }
+      // APsystems via EMA — rate-limit large (~60mn) vu le quota observé de
+      // l'API officielle (~1000 appels/mois), et chaque cycle fait plusieurs
+      // appels (liste ECU + résumé + courbe par ECU).
+      if (_apEmaClient != null) {
+        final now = DateTime.now();
+        final tooSoon = _lastApEmaRefresh != null &&
+            now.difference(_lastApEmaRefresh!) < const Duration(minutes: 60);
+        if (!tooSoon) {
+          _lastApEmaRefresh = now;
+          try {
+            final ecus = await _apEmaClient!.fetchAll();
+            if (mounted) setState(() {
+              _solarState = _solarState.copyWith(
+                apEmaEcus: ecus,
+                apEmaOk: true, apEmaStatus: TimeOfDay.now().format(context),
+              );
+            });
+          } catch (e) {
+            final msg = e.toString().replaceFirst('Exception: ', '');
+            final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
+            if (mounted) setState(() => _solarState = _solarState.copyWith(apEmaOk: false, apEmaStatus: short));
+          }
+        }
+      }
+      // APsystems ECU local — réseau local, pas de quota à respecter, tourne
+      // sur le même rythme que les autres fournisseurs locaux (OpenDTU).
+      if (_apEcuClient != null) {
+        try {
+          final data = await _apEcuClient!.fetchAll();
+          if (mounted) setState(() {
+            _solarState = _solarState.copyWith(
+              apEcuData: data,
+              apEcuOk: true, apEcuStatus: TimeOfDay.now().format(context),
+            );
+          });
+        } catch (e) {
+          final msg = e.toString().replaceFirst('Exception: ', '');
+          final short = msg.length > 60 ? '${msg.substring(0, 60)}…' : msg;
+          if (mounted) setState(() => _solarState = _solarState.copyWith(apEcuOk: false, apEcuStatus: short));
         }
       }
     } finally {
@@ -3287,12 +3744,17 @@ class _HomeScreenState extends State<HomeScreen> {
         .fold<double>(0, (sum, st) => sum + (st.powerW ?? 0));
     final openDtuTotalPv = s.openDtuInverters
         .fold<double>(0, (sum, inv) => sum + (inv.powerW ?? 0));
-    return (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv + hoyTotalPv + openDtuTotalPv;
+    final apEmaTotalPv = s.apEmaEcus
+        .fold<double>(0, (sum, e) => sum + (e.powerW ?? 0));
+    final apEcuTotalPv = s.apEcuData?.currentPowerW ?? 0;
+    return (s.izyPvW ?? 0) + (s.sunologyPvW ?? 0) + apTotalPv + hoyTotalPv +
+        openDtuTotalPv + apEmaTotalPv + apEcuTotalPv;
   }
 
   bool get _solarHasAnyValue =>
       _solarState.izyOk || _solarState.sunologyOk ||
-          _solarState.apsystemsOk || _solarState.hoymilesOk || _solarState.openDtuOk;
+          _solarState.apsystemsOk || _solarState.hoymilesOk || _solarState.openDtuOk ||
+          _solarState.apEmaOk || _solarState.apEcuOk;
 
   // ── Bloc météo (optionnel, affiché uniquement si activé en config) ─────────
   Widget _buildWeatherBlock(WeatherData? weather, bool ok, String status) {
@@ -3499,6 +3961,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final hasAp   = _solarConfig.apsystemsEnabled;
     final hasHoy  = _solarConfig.hoymilesEnabled;
     final hasOpenDtu = _solarConfig.openDtuEnabled;
+    final hasApEma = _solarConfig.apEmaEnabled;
+    final hasApEcu = _solarConfig.apEcuEnabled;
 
     // Total journalier cumulé (kWh) toutes sources activées confondues.
     // Sunology stocke sa valeur "Jour" en texte déjà formaté par l'API
@@ -3542,6 +4006,17 @@ class _HomeScreenState extends State<HomeScreen> {
       if (s.openDtuInverters.any((inv) => inv.yieldDayWh != null)) {
         dailyTotalKwh = (dailyTotalKwh ?? 0) + openDtuDaily;
       }
+    }
+    if (hasApEma) {
+      final apEmaDaily = s.apEmaEcus
+          .where((e) => e.todayKwh != null)
+          .fold<double>(0, (sum, e) => sum + e.todayKwh!);
+      if (s.apEmaEcus.any((e) => e.todayKwh != null)) {
+        dailyTotalKwh = (dailyTotalKwh ?? 0) + apEmaDaily;
+      }
+    }
+    if (hasApEcu && s.apEcuData?.todayKwh != null) {
+      dailyTotalKwh = (dailyTotalKwh ?? 0) + s.apEcuData!.todayKwh!;
     }
 
     // Tri des onduleurs EasyPower selon l'ordre choisi par l'utilisateur
@@ -3965,6 +4440,147 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
               }),
             ],
+          const SizedBox(height: 20),
+        ],
+
+        // ── Section APsystems via EMA (un bloc par ECU) ─────────────────────────
+        if (hasApEma) ...[
+          _solarSectionHeader('APSYSTEMS · EMA', const Color(0xFF3B82F6), s.apEmaOk, s.apEmaStatus),
+          const SizedBox(height: 10),
+          if (s.apEmaEcus.isEmpty)
+            Text('Aucune ECU trouvée', style: TextStyle(fontSize: 12, color: appLabelColor))
+          else
+            for (var i = 0; i < s.apEmaEcus.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              Builder(builder: (_) {
+                final ecu = s.apEmaEcus[i];
+                String? kwh(double? v) => v != null ? '${v.toStringAsFixed(2)} kWh' : null;
+                return Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D1420),
+                    border: Border.all(color: Colors.white.withOpacity(0.06)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('ECU ${ecu.eid}',
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                            letterSpacing: 1.2, color: appLabelColor)),
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Icon(Icons.solar_power_outlined, color: const Color(0xFFFACC15), size: 20),
+                      const SizedBox(width: 8),
+                      Text(ecu.powerW != null ? '${ecu.powerW!.round()} W' : '--',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 20,
+                              fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+                    ]),
+                    const SizedBox(height: 10),
+                    IntrinsicHeight(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Expanded(child: _solarMiniStat('Jour', kwh(ecu.todayKwh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Mois', kwh(ecu.monthKwh))),
+                      ]),
+                    ),
+                    const SizedBox(height: 8),
+                    IntrinsicHeight(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Expanded(child: _solarMiniStat('Année', kwh(ecu.yearKwh))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _solarMiniStat('Total', kwh(ecu.lifetimeKwh))),
+                      ]),
+                    ),
+                  ]),
+                );
+              }),
+            ],
+          const SizedBox(height: 20),
+        ],
+
+        // ── Section APsystems ECU local (infos ECU + détail par onduleur) ──────
+        if (hasApEcu) ...[
+          _solarSectionHeader('APSYSTEMS · ECU LOCAL', const Color(0xFF3B82F6), s.apEcuOk, s.apEcuStatus),
+          const SizedBox(height: 10),
+          if (s.apEcuData == null)
+            Text('Aucune donnée', style: TextStyle(fontSize: 12, color: appLabelColor))
+          else ...[
+            Builder(builder: (_) {
+              final ecu = s.apEcuData!;
+              String? kwh(double? v) => v != null ? '${v.toStringAsFixed(2)} kWh' : null;
+              return Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0D1420),
+                  border: Border.all(color: Colors.white.withOpacity(0.06)),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('ECU ${ecu.ecuId}',
+                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                          letterSpacing: 1.2, color: appLabelColor)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Icon(Icons.solar_power_outlined, color: const Color(0xFFFACC15), size: 20),
+                    const SizedBox(width: 8),
+                    Text(ecu.currentPowerW != null ? '${ecu.currentPowerW!.round()} W' : '--',
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 20,
+                            fontWeight: FontWeight.w500, color: Color(0xFFFACC15))),
+                    if (ecu.inverterOnlineCount != null && ecu.inverterCount != null) ...[
+                      const Spacer(),
+                      Text('${ecu.inverterOnlineCount}/${ecu.inverterCount} en ligne',
+                          style: TextStyle(fontSize: 11, color: appLabelColor)),
+                    ],
+                  ]),
+                  const SizedBox(height: 10),
+                  IntrinsicHeight(
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                      Expanded(child: _solarMiniStat('Jour', kwh(ecu.todayKwh))),
+                      const SizedBox(width: 8),
+                      Expanded(child: _solarMiniStat('Total', kwh(ecu.lifetimeKwh))),
+                    ]),
+                  ),
+                ]),
+              );
+            }),
+            if (s.apEcuData!.inverters.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              for (var i = 0; i < s.apEcuData!.inverters.length; i++) ...[
+                if (i > 0) const SizedBox(height: 8),
+                Builder(builder: (_) {
+                  final inv = s.apEcuData!.inverters[i];
+                  final totalPower = inv.channelPowerW.fold<double>(0, (a, b) => a + b);
+                  return Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0D1420),
+                      border: Border.all(color: Colors.white.withOpacity(0.06)),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(children: [
+                      Container(width: 6, height: 6, decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: inv.online ? const Color(0xFF22D3A8) : const Color(0xFFF43F5E))),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(inv.uid,
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 11,
+                              color: Color(0xFFE8EAF0)))),
+                      if (inv.online) ...[
+                        Text('${totalPower.round()} W',
+                            style: const TextStyle(fontFamily: 'monospace', fontSize: 13,
+                                fontWeight: FontWeight.w600, color: Color(0xFFFACC15))),
+                        if (inv.tempC != null) ...[
+                          const SizedBox(width: 10),
+                          Text('${inv.tempC!.round()}°C',
+                              style: TextStyle(fontSize: 11, color: appLabelColor)),
+                        ],
+                      ] else
+                        Text('hors ligne', style: TextStyle(fontSize: 11, color: appLabelColor)),
+                    ]),
+                  );
+                }),
+              ],
+            ],
+          ],
           const SizedBox(height: 20),
         ],
       ]),
@@ -5101,6 +5717,16 @@ class _ConfigSheetState extends State<ConfigSheet> {
   bool _meteoSearching = false;
   String? _meteoSearchError;
   List<OpenMeteoGeocodingResult>? _meteoResults;
+  late bool _apEmaEnabled;
+  late TextEditingController _apEmaAppIdCtrl, _apEmaAppSecretCtrl, _apEmaSidCtrl;
+  bool _apEmaTesting = false;
+  String? _apEmaTestResult;
+  bool _apEmaTestOk = false;
+  late bool _apEcuEnabled;
+  late TextEditingController _apEcuIpCtrl;
+  bool _apEcuTesting = false;
+  String? _apEcuTestResult;
+  bool _apEcuTestOk = false;
   late TextEditingController _totalCapacityCtrl;
   bool _sunoTesting = false, _izyTesting = false, _apTesting = false, _hoyTesting = false, _openDtuTesting = false;
   bool _izyDiscovering = false;
@@ -5164,6 +5790,12 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _meteoCityCtrl    = TextEditingController();
     _meteoLatCtrl     = TextEditingController(text: sc.meteoLat?.toString() ?? '');
     _meteoLonCtrl     = TextEditingController(text: sc.meteoLon?.toString() ?? '');
+    _apEmaEnabled     = sc.apEmaEnabled;
+    _apEmaAppIdCtrl     = TextEditingController(text: sc.apEmaAppId);
+    _apEmaAppSecretCtrl = TextEditingController(text: sc.apEmaAppSecret);
+    _apEmaSidCtrl       = TextEditingController(text: sc.apEmaSid);
+    _apEcuEnabled = sc.apEcuEnabled;
+    _apEcuIpCtrl  = TextEditingController(text: sc.apEcuIp);
     _totalCapacityCtrl = TextEditingController(
         text: sc.totalCapacityW > 0 ? sc.totalCapacityW.round().toString() : '');
     _ctrls = widget.currentConfigs.map((c) => {
@@ -5202,6 +5834,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _hoyUserCtrl.dispose(); _hoyPwdCtrl.dispose();
     _openDtuUrlCtrl.dispose();
     _meteoCityCtrl.dispose(); _meteoLatCtrl.dispose(); _meteoLonCtrl.dispose();
+    _apEmaAppIdCtrl.dispose(); _apEmaAppSecretCtrl.dispose(); _apEmaSidCtrl.dispose();
+    _apEcuIpCtrl.dispose();
     _totalCapacityCtrl.dispose();
     super.dispose();
   }
@@ -5493,10 +6127,12 @@ class _ConfigSheetState extends State<ConfigSheet> {
         _meteoSearching = false;
         if (results.isEmpty) _meteoSearchError = 'Aucun résultat trouvé';
       });
-    } catch (_) {
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      final short = msg.length > 80 ? '${msg.substring(0, 80)}…' : msg;
       setState(() {
         _meteoSearching = false;
-        _meteoSearchError = 'Erreur de recherche';
+        _meteoSearchError = 'Erreur : $short';
       });
     }
   }
@@ -5510,6 +6146,59 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _meteoResults = null;
       _meteoCityCtrl.clear();
     });
+  }
+
+  Future<void> _testApEma() async {
+    setState(() { _apEmaTesting = true; _apEmaTestResult = null; });
+    try {
+      if (_apEmaSidCtrl.text.trim().isEmpty) {
+        throw Exception('SID requis (visible dans le portail EMA)');
+      }
+      final client = ApEmaClient(
+        appId: _apEmaAppIdCtrl.text.trim(),
+        appSecret: _apEmaAppSecretCtrl.text.trim(),
+        sid: _apEmaSidCtrl.text.trim(),
+      );
+      final ecus = await client.fetchAll();
+      setState(() {
+        _apEmaTestOk = true;
+        _apEmaTestResult = ecus.isEmpty
+            ? 'Connecté (aucune ECU trouvée)'
+            : 'Connecté · ${ecus.length} ECU';
+        _apEmaTesting = false;
+      });
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _apEmaTestOk = false;
+        _apEmaTestResult = 'Échec : $msg';
+        _apEmaTesting = false;
+      });
+    }
+  }
+
+  Future<void> _testApEcu() async {
+    setState(() { _apEcuTesting = true; _apEcuTestResult = null; });
+    try {
+      if (_apEcuIpCtrl.text.trim().isEmpty) {
+        throw Exception('Adresse IP requise');
+      }
+      final client = ApEcuLocalClient(ip: _apEcuIpCtrl.text.trim());
+      final data = await client.fetchAll();
+      setState(() {
+        _apEcuTestOk = true;
+        _apEcuTestResult = 'Connecté · ECU ${data.ecuId} · '
+            '${data.inverters.length} onduleur(s)';
+        _apEcuTesting = false;
+      });
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _apEcuTestOk = false;
+        _apEcuTestResult = 'Échec : $msg';
+        _apEcuTesting = false;
+      });
+    }
   }
 
   void _moveApInverter(int index, int delta) {
@@ -5920,72 +6609,6 @@ class _ConfigSheetState extends State<ConfigSheet> {
               const Text('Calibre la jauge de production totale sur l\'onglet solaire',
                   style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
               const SizedBox(height: 12),
-              // Sunology
-              CheckboxListTile(
-                value: _sunologyEnabled,
-                onChanged: (v) => setState(() => _sunologyEnabled = v!),
-                title: const Text('Sunology',
-                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
-                activeColor: const Color(0xFF3B82F6),
-                side: BorderSide(color: Colors.white.withOpacity(0.3)),
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-              ),
-              if (_sunologyEnabled) ...[
-                const SizedBox(height: 6),
-                TextField(
-                  controller: _sunoEmailCtrl,
-                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
-                  decoration: _inputDeco('Email Sunology'),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _sunoPwdCtrl,
-                  obscureText: true,
-                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
-                  decoration: _inputDeco('Mot de passe'),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _sunoTesting ? null : _testSunology,
-                    icon: _sunoTesting
-                        ? const SizedBox(width: 14, height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF3B82F6)))
-                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFF3B82F6)),
-                    label: Text(_sunoTesting ? 'Test en cours…' : 'Tester la connexion',
-                        style: const TextStyle(fontSize: 13, color: Color(0xFF3B82F6))),
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Color(0xFF3B82F6), width: 0.5),
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
-                  ),
-                ),
-                if (_sunoTestResult != null) ...[
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: _sunoTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: (_sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
-                    ),
-                    child: Row(children: [
-                      Icon(_sunoTestOk ? Icons.check_circle_outline : Icons.error_outline,
-                          size: 14, color: _sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
-                      const SizedBox(width: 6),
-                      Expanded(child: Text(_sunoTestResult!,
-                          style: TextStyle(fontSize: 12,
-                              color: _sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
-                    ]),
-                  ),
-                ],
-                const SizedBox(height: 12),
-              ],
-              Divider(color: Colors.white.withOpacity(0.07), height: 1),
-              const SizedBox(height: 12),
               // Izypower
               CheckboxListTile(
                 value: _izypowerEnabled,
@@ -6109,11 +6732,77 @@ class _ConfigSheetState extends State<ConfigSheet> {
               ],
               Divider(color: Colors.white.withOpacity(0.07), height: 1),
               const SizedBox(height: 12),
+              // Sunology
+              CheckboxListTile(
+                value: _sunologyEnabled,
+                onChanged: (v) => setState(() => _sunologyEnabled = v!),
+                title: const Text('Sunology',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                activeColor: const Color(0xFF3B82F6),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_sunologyEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _sunoEmailCtrl,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Email Sunology'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _sunoPwdCtrl,
+                  obscureText: true,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('Mot de passe'),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _sunoTesting ? null : _testSunology,
+                    icon: _sunoTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF3B82F6)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFF3B82F6)),
+                    label: Text(_sunoTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF3B82F6))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF3B82F6), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_sunoTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _sunoTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_sunoTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_sunoTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _sunoTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+                const SizedBox(height: 12),
+              ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
               // AP Systems EasyPower
               CheckboxListTile(
                 value: _apsystemsEnabled,
                 onChanged: (v) => setState(() => _apsystemsEnabled = v!),
-                title: const Text('EasyPower (APsystems)',
+                title: const Text('APsystems (EasyPower)',
                     style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
                 activeColor: const Color(0xFF22C55E),
                 side: BorderSide(color: Colors.white.withOpacity(0.3)),
@@ -6212,6 +6901,145 @@ class _ConfigSheetState extends State<ConfigSheet> {
                         ),
                       ]),
                     ),
+                ],
+              ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // APsystems via EMA (API officielle, installations résidentielles ECU)
+              CheckboxListTile(
+                value: _apEmaEnabled,
+                onChanged: (v) => setState(() => _apEmaEnabled = v!),
+                title: const Text('APsystems (EMA)',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                subtitle: const Text('API officielle — installations résidentielles avec ECU',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                activeColor: const Color(0xFF3B82F6),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_apEmaEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _apEmaAppIdCtrl,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('App Id (fourni par APsystems par email)'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _apEmaAppSecretCtrl,
+                  obscureText: true,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('App Secret'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _apEmaSidCtrl,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('SID (visible dans le portail EMA)'),
+                ),
+                const SizedBox(height: 4),
+                Text('Inscription préalable par email obligatoire auprès d\'APsystems pour obtenir App Id/Secret',
+                    style: TextStyle(fontSize: 10, color: appLabelColor)),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _apEmaTesting ? null : _testApEma,
+                    icon: _apEmaTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF3B82F6)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFF3B82F6)),
+                    label: Text(_apEmaTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF3B82F6))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF3B82F6), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_apEmaTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _apEmaTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_apEmaTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_apEmaTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _apEmaTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_apEmaTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _apEmaTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
+                ],
+              ],
+              Divider(color: Colors.white.withOpacity(0.07), height: 1),
+              const SizedBox(height: 12),
+              // APsystems ECU local (protocole binaire, réseau local, sans identifiant)
+              CheckboxListTile(
+                value: _apEcuEnabled,
+                onChanged: (v) => setState(() => _apEcuEnabled = v!),
+                title: const Text('APsystems (ECU local)',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
+                subtitle: const Text('Requête directe à l\'ECU, sans compte (réseau local ou accès distant perso)',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
+                activeColor: const Color(0xFF3B82F6),
+                side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+              if (_apEcuEnabled) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _apEcuIpCtrl,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE8EAF0)),
+                  decoration: _inputDeco('192.168.1.X (ou adresse distante)'),
+                ),
+                const SizedBox(height: 4),
+                Text('IP locale si même réseau que le téléphone, ou adresse distante si tu as monté ton propre accès (VPN, DDNS…)',
+                    style: TextStyle(fontSize: 10, color: appLabelColor)),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _apEcuTesting ? null : _testApEcu,
+                    icon: _apEcuTesting
+                        ? const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF3B82F6)))
+                        : const Icon(Icons.wifi_find_outlined, size: 16, color: Color(0xFF3B82F6)),
+                    label: Text(_apEcuTesting ? 'Test en cours…' : 'Tester la connexion',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF3B82F6))),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF3B82F6), width: 0.5),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                if (_apEcuTestResult != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _apEcuTestOk ? const Color(0xFF14532D) : const Color(0xFF450A0A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: (_apEcuTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)).withOpacity(0.4)),
+                    ),
+                    child: Row(children: [
+                      Icon(_apEcuTestOk ? Icons.check_circle_outline : Icons.error_outline,
+                          size: 14, color: _apEcuTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(_apEcuTestResult!,
+                          style: TextStyle(fontSize: 12,
+                              color: _apEcuTestOk ? const Color(0xFF22C55E) : const Color(0xFFF43F5E)))),
+                    ]),
+                  ),
                 ],
               ],
               Divider(color: Colors.white.withOpacity(0.07), height: 1),
@@ -6631,6 +7459,12 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     meteoLat: double.tryParse(_meteoLatCtrl.text.trim().replaceAll(',', '.')),
                     meteoLon: double.tryParse(_meteoLonCtrl.text.trim().replaceAll(',', '.')),
                     meteoLocationName: _meteoLocationName,
+                    apEmaEnabled: _apEmaEnabled,
+                    apEmaAppId: _apEmaAppIdCtrl.text.trim(),
+                    apEmaAppSecret: _apEmaAppSecretCtrl.text.trim(),
+                    apEmaSid: _apEmaSidCtrl.text.trim(),
+                    apEcuEnabled: _apEcuEnabled,
+                    apEcuIp: _apEcuIpCtrl.text.trim(),
                     totalCapacityW: double.tryParse(_totalCapacityCtrl.text.trim()) ?? 0,
                   );
                   await widget.onSave(configs, _orientation, _displayMode, _multiSites, _labelColor, solarConfig);
