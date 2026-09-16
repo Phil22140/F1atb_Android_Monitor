@@ -82,6 +82,10 @@ v4.9.0 - Correction Bug de test de connexion
 
 v4.10.0 - Météo locale (Open-Meteo), mode routeur F1ATB confirmé, correctifs UI et jauges"
 
+v4.11.1 - APsystems EMA local, réorganisation config UI
+
+v4.12.1 - APsystems ECU local (protocole TCP brut, 3e variante APsystems)
+
 --------
 
 
