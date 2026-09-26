@@ -86,6 +86,8 @@ v4.11.1 - APsystems EMA local, réorganisation config UI
 
 v4.12.1 - APsystems ECU local (protocole TCP brut, 3e variante APsystems)
 
+v4.13.0 - Energie jour/total 2e sonde, pic de puissance du jour, diagnostic routeur (uptime, RSSI, memoire, journal systeme)
+
 --------
 
 
