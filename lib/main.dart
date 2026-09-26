@@ -42,7 +42,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.13.0';
+const String appVersion = '4.13.2';
 const String RS = '\x1e'; // Record Separator
 const String US = '\x1f'; // Unit Separator
 const String ES = '\x1b'; // ESC Separator (nommage firmware, pas le caractère ASCII "ES" standard)
@@ -4157,7 +4157,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final visible = hours.where((h) => h.time.isAfter(now.subtract(const Duration(hours: 1)))).toList();
     if (visible.isEmpty) return const SizedBox.shrink();
     return SizedBox(
-      height: 92,
+      height: 104,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: visible.length,
@@ -4195,6 +4195,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
+              const SizedBox(height: 2),
+              // Valeur brute (W/m²) sans unité, juste sous la barre — la barre
+              // seule était peu lisible sans repère chiffré.
+              Text(h.shortwaveRadiation != null ? '${h.shortwaveRadiation!.round()}' : '--',
+                  style: TextStyle(fontSize: 8, color: appLabelColor)),
             ]),
           );
         },
@@ -4312,7 +4317,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         // ── Section Isypower ──────────────────────────────────────────────────
         if (hasIzy) ...[
-          _solarSectionHeader('IZYPOWER', const Color(0xFFF97316), s.izyOk, s.izyStatus),
+          _solarSectionHeader('ISYPOWER', const Color(0xFFF97316), s.izyOk, s.izyStatus),
           const SizedBox(height: 10),
 
           // ── Prod. PV (total) + détail PV1-4 compact à côté ────────────────
