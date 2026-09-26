@@ -42,8 +42,10 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.12.1';
+const String appVersion = '4.13.0';
 const String RS = '\x1e'; // Record Separator
+const String US = '\x1f'; // Unit Separator
+const String ES = '\x1b'; // ESC Separator (nommage firmware, pas le caractère ASCII "ES" standard)
 
 // Couleur des textes secondaires (labels, statuts) — modifiable par l'utilisateur
 Color appLabelColor = const Color(0xFF5A6278);
@@ -97,17 +99,127 @@ Map<String, double> parsePuissances(String body) {
 // elementsMaison = ['PwS_M','PwI_M','PVAS_M','PVAI_M','EAJS_M','EAJI_M',
 // 'EAS_M','EAI_M'] mappé sur G1[0..7] — les 4 premiers (puissances) sont déjà
 // gérés par parsePuissances ci-dessus, ceci complète avec les 4 derniers.
+// Confirmé par le code source du firmware (JS_Accueil.h) : la 2e sonde (Triac)
+// a un tableau strictement symétrique elementsTriac mappé sur G2[0..7].
 Map<String, double?> parseEnergieJour(String body) {
   final groupes = body.split(GS);
   if (groupes.length < 2) return const {};
   final g1 = groupes[1].split(RS);
   double? at(int i) => g1.length > i ? double.tryParse(g1[i].trim()) : null;
-  return {
+  final result = {
     'whJourSoutire': at(4),
     'whJourInjecte': at(5),
     'whTotalSoutire': at(6),
     'whTotalInjecte': at(7),
   };
+  if (groupes.length >= 3) {
+    final g2 = groupes[2].split(RS);
+    double? at2(int i) => g2.length > i ? double.tryParse(g2[i].trim()) : null;
+    result['whJourSoutireT'] = at2(4);
+    result['whJourInjecteT'] = at2(5);
+    result['whTotalSoutireT'] = at2(6);
+    result['whTotalInjecteT'] = at2(7);
+  }
+  return result;
+}
+
+// Puissance max du jour — préfixe (chunks[0]) de /ajax_histo48h, remis à zéro
+// à minuit côté firmware (Heure.ino : "Puissance Max du jour à zero"). Format :
+// PuisMaxS_M RS PuisMaxI_M RS PuisMaxS_T RS PuisMaxI_T (entiers, W).
+Map<String, double?> parseDailyPeaks(String body) {
+  final groupes = body.split(GS);
+  if (groupes.isEmpty) return const {};
+  final vals = groupes[0].split(RS);
+  double? at(int i) => vals.length > i ? double.tryParse(vals[i].trim()) : null;
+  return {
+    'maxPwsToday': at(0),
+    'maxPwiToday': at(1),
+    'maxPwsTToday': at(2),
+    'maxPwiTToday': at(3),
+  };
+}
+
+// ── Diagnostic routeur (/ajax_dataESP32) — format confirmé par le code source
+// du firmware (Server.ino, handleAjaxESP32). Un seul groupe RS-séparé pour les
+// infos système, puis GS, puis les 10 derniers messages (RS-séparés), puis GS,
+// puis les entrées RMS (routeurs distants) si multi-routeurs.
+class EspDiagnostic {
+  final double? uptimeHours;
+  final bool isEthernet; // ESP32_Type == 10
+  final int? wifiRssi;
+  final String? wifiBssid;
+  final int? wifiChannel;
+  final String? mac;
+  final String? ssid;
+  final String? localIp, hostname, gatewayIp, subnetMask;
+  final String? coeur0, coeur1; // "min, moy, max" (texte brut du firmware)
+  final int? heapCurrent, heapMin; // octets
+  final String? triacInfo; // "In/Total" interruptions, ou "Pas de Triac"
+  final String? syncMode;  // "Secteur" ou "Horloge ESP"
+  final int? nbrDS18B20;
+  final List<String> messages;
+  final List<String> rmsEntries;
+  const EspDiagnostic({
+    this.uptimeHours, this.isEthernet = false,
+    this.wifiRssi, this.wifiBssid, this.wifiChannel,
+    this.mac, this.ssid, this.localIp, this.hostname, this.gatewayIp, this.subnetMask,
+    this.coeur0, this.coeur1, this.heapCurrent, this.heapMin,
+    this.triacInfo, this.syncMode, this.nbrDS18B20,
+    this.messages = const [], this.rmsEntries = const [],
+  });
+}
+
+EspDiagnostic? parseEspDiagnostic(String body) {
+  final groupes = body.split(GS);
+  if (groupes.isEmpty) return null;
+  final main = groupes[0].split(RS);
+  String? sat(int i) => main.length > i ? main[i] : null;
+
+  final uptimeHours = double.tryParse(sat(0) ?? '');
+  final esp32Type = int.tryParse(sat(1) ?? '');
+  final isEthernet = esp32Type == 10;
+
+  // Ethernet : 3 champs vides à la place de RSSI/BSSID/canal (mais toujours
+  // présents dans le flux RS-séparé, juste vides) — même décalage d'index.
+  final wifiRssi = !isEthernet ? int.tryParse(sat(2) ?? '') : null;
+  final wifiBssid = !isEthernet ? sat(3) : null;
+  final wifiChannel = !isEthernet ? int.tryParse(sat(4) ?? '') : null;
+
+  final mac = sat(5);
+  final ssid = sat(6);
+  // adr = "localIP US hostname US ipv6" (un seul champ RS, avec US à l'intérieur)
+  final adrParts = (sat(7) ?? '').split(US);
+  final localIp = adrParts.isNotEmpty ? adrParts[0] : null;
+  final hostname = adrParts.length > 1 ? adrParts[1] : null;
+  final gatewayIp = sat(8);
+  final subnetMask = sat(9);
+
+  final coeur0 = sat(10);
+  final coeur1 = sat(11);
+  // sat(12) = "inutil", champ hérité non exploité
+  final heapCurrent = int.tryParse(sat(13) ?? '');
+  final heapMin = int.tryParse(sat(14) ?? '');
+  final triacInfo = sat(15);
+  final syncMode = sat(16);
+  final nbrDS18B20 = int.tryParse(sat(17) ?? '');
+  // sat(18) = AllTemp, déjà dispo via /ajax_data — pas reparsé ici
+
+  final messages = groupes.length > 1
+      ? groupes[1].split(RS).where((m) => m.trim().isNotEmpty).toList()
+      : const <String>[];
+  final rmsEntries = groupes.length > 2
+      ? groupes[2].split(RS).where((r) => r.trim().isNotEmpty).toList()
+      : const <String>[];
+
+  return EspDiagnostic(
+    uptimeHours: uptimeHours, isEthernet: isEthernet,
+    wifiRssi: wifiRssi, wifiBssid: wifiBssid, wifiChannel: wifiChannel,
+    mac: mac, ssid: ssid, localIp: localIp, hostname: hostname,
+    gatewayIp: gatewayIp, subnetMask: subnetMask,
+    coeur0: coeur0, coeur1: coeur1, heapCurrent: heapCurrent, heapMin: heapMin,
+    triacInfo: triacInfo, syncMode: syncMode, nbrDS18B20: nbrDS18B20,
+    messages: messages, rmsEntries: rmsEntries,
+  );
 }
 
 // ── Parsing Tempo RTE (couleur tarifaire) ─────────────────────────────────────
@@ -261,7 +373,7 @@ class ChauffeEauApp extends StatelessWidget {
   }
 }
 
-// ── Suivi solaire (Izypower / Sunology) ────────────────────────────────────────
+// ── Suivi solaire (Isypower / Sunology) ────────────────────────────────────────
 
 class SolarConfig {
   final bool enabled;
@@ -449,11 +561,11 @@ class SolarState {
   final String? sunologyDayTxt, sunologyWeekTxt, sunologyMonthTxt, sunologyYearTxt;
   final bool sunologyOk;
   final String sunologyStatus;
-  // Izypower — station info (endpoint principal)
+  // Isypower — station info (endpoint principal)
   final double? izySocPct, izyBatteryPowerW, izyPvW, izyGridW;
   final bool izyOk;
   final String izyStatus;
-  // Izypower — détail batterie (endpoint /izy/v2/battery/{sn}, optionnel)
+  // Isypower — détail batterie (endpoint /izy/v2/battery/{sn}, optionnel)
   final String? izyBatteryState;   // Statique / En charge / En décharge
   final double? izyBatteryTempC;
   final double? izyChargeExterneW, izyChargePvW;
@@ -585,7 +697,7 @@ class SolarState {
   }
 }
 
-// ── Client API Izypower (JWT, header x-tts-access-token) ──────────────────────
+// ── Client API Isypower (JWT, header x-tts-access-token) ──────────────────────
 class IzypowerClient {
   static const String baseUrl = 'http://application.izypowercloud.fr/photo_voltaic/api';
   final String username, password;
@@ -603,7 +715,7 @@ class IzypowerClient {
       final resp = await req.close().timeout(const Duration(seconds: 10));
       final body = await resp.transform(utf8.decoder).join();
       if (resp.statusCode != 200) {
-        throw Exception('Login Izypower échoué (${resp.statusCode})');
+        throw Exception('Login Isypower échoué (${resp.statusCode})');
       }
       final data = jsonDecode(body);
       _token = data['data']['token'] as String;
@@ -632,7 +744,7 @@ class IzypowerClient {
       }
       final body = await resp.transform(utf8.decoder).join();
       if (resp.statusCode != 200) {
-        throw Exception('Izypower erreur ${resp.statusCode}');
+        throw Exception('Isypower erreur ${resp.statusCode}');
       }
       final json = jsonDecode(body) as Map<String, dynamic>;
       final records = (json['data']?['records'] as List?) ?? [];
@@ -665,7 +777,7 @@ class IzypowerClient {
       }
       final body = await resp.transform(utf8.decoder).join();
       if (resp.statusCode != 200) {
-        throw Exception('Izypower erreur ${resp.statusCode}');
+        throw Exception('Isypower erreur ${resp.statusCode}');
       }
       final json = jsonDecode(body) as Map<String, dynamic>;
       final records = (json['data']?['records'] as List?) ?? [];
@@ -725,7 +837,7 @@ class IzypowerClient {
       }
       final body = await resp.transform(utf8.decoder).join();
       if (resp.statusCode != 200) {
-        throw Exception('Izypower erreur ${resp.statusCode}');
+        throw Exception('Isypower erreur ${resp.statusCode}');
       }
       return jsonDecode(body) as Map<String, dynamic>;
     } finally {
@@ -753,7 +865,7 @@ class IzypowerClient {
       }
       final body = await resp.transform(utf8.decoder).join();
       if (resp.statusCode != 200) {
-        throw Exception('Izypower batterie erreur ${resp.statusCode}');
+        throw Exception('Isypower batterie erreur ${resp.statusCode}');
       }
       final json = jsonDecode(body) as Map<String, dynamic>;
       return (json['data'] as Map<String, dynamic>?) ?? {};
@@ -2027,6 +2139,14 @@ class EspState {
   final double? whJourInjecte;
   final double? whTotalSoutire; // Wh cumul total depuis installation
   final double? whTotalInjecte;
+  final double? whJourSoutireT; // idem pour la 2e sonde (Triac) — G2[4..7]
+  final double? whJourInjecteT;
+  final double? whTotalSoutireT;
+  final double? whTotalInjecteT;
+  final double? maxPwsToday;  // pic de puissance soutirée aujourd'hui (W), remis à 0 à minuit côté firmware
+  final double? maxPwiToday;  // idem injectée
+  final double? maxPwsTToday; // idem 2e sonde
+  final double? maxPwiTToday;
   final String nomSonde1;
   final String nomSonde2;
   final String nomPpos;
@@ -2036,6 +2156,7 @@ class EspState {
   final bool ok;
   final String statusTxt;
   final String? routerVersion;
+  final String? routerVersionDebug; // diagnostic visible : erreur exacte si le fetch/parse échoue
 
   EspState({
     this.modules = const [],
@@ -2050,6 +2171,14 @@ class EspState {
     this.whJourInjecte,
     this.whTotalSoutire,
     this.whTotalInjecte,
+    this.whJourSoutireT,
+    this.whJourInjecteT,
+    this.whTotalSoutireT,
+    this.whTotalInjecteT,
+    this.maxPwsToday,
+    this.maxPwiToday,
+    this.maxPwsTToday,
+    this.maxPwiTToday,
     this.nomSonde1 = '',
     this.nomSonde2 = '',
     this.nomPpos = 'Soutiré',
@@ -2059,6 +2188,7 @@ class EspState {
     this.ok = false,
     this.statusTxt = 'connexion…',
     this.routerVersion,
+    this.routerVersionDebug,
   })  : capteursInfo = capteursInfo ?? const [],
         temperatures = temperatures ?? const [null, null, null, null];
 
@@ -2076,6 +2206,14 @@ class EspState {
     double? whJourInjecte,
     double? whTotalSoutire,
     double? whTotalInjecte,
+    double? whJourSoutireT,
+    double? whJourInjecteT,
+    double? whTotalSoutireT,
+    double? whTotalInjecteT,
+    double? maxPwsToday,
+    double? maxPwiToday,
+    double? maxPwsTToday,
+    double? maxPwiTToday,
     String? nomSonde1,
     String? nomSonde2,
     String? nomPpos,
@@ -2085,6 +2223,7 @@ class EspState {
     bool? ok,
     String? statusTxt,
     String? routerVersion,
+    String? routerVersionDebug,
   }) {
     return EspState(
       modules: modules ?? this.modules,
@@ -2099,6 +2238,14 @@ class EspState {
       whJourInjecte: whJourInjecte ?? this.whJourInjecte,
       whTotalSoutire: whTotalSoutire ?? this.whTotalSoutire,
       whTotalInjecte: whTotalInjecte ?? this.whTotalInjecte,
+      whJourSoutireT: whJourSoutireT ?? this.whJourSoutireT,
+      whJourInjecteT: whJourInjecteT ?? this.whJourInjecteT,
+      whTotalSoutireT: whTotalSoutireT ?? this.whTotalSoutireT,
+      whTotalInjecteT: whTotalInjecteT ?? this.whTotalInjecteT,
+      maxPwsToday: maxPwsToday ?? this.maxPwsToday,
+      maxPwiToday: maxPwiToday ?? this.maxPwiToday,
+      maxPwsTToday: maxPwsTToday ?? this.maxPwsTToday,
+      maxPwiTToday: maxPwiTToday ?? this.maxPwiTToday,
       nomSonde1: nomSonde1 ?? this.nomSonde1,
       nomSonde2: nomSonde2 ?? this.nomSonde2,
       nomPpos: nomPpos ?? this.nomPpos,
@@ -2108,6 +2255,7 @@ class EspState {
       ok: ok ?? this.ok,
       statusTxt: statusTxt ?? this.statusTxt,
       routerVersion: routerVersion ?? this.routerVersion,
+      routerVersionDebug: routerVersionDebug ?? this.routerVersionDebug,
     );
   }
 }
@@ -2150,6 +2298,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _solarRefreshInProgress = false; // évite les cycles qui se chevauchent
   Timer? _solarTimer;
   Timer? _izyLiveModeTimer;
+  Timer? _capteursInfoTimer; // ré-essai périodique (infos fixes : version routeur, noms sondes)
+  Timer? _dailyPeaksTimer; // pics de puissance du jour — payload lourd (600pts), refresh peu fréquent
 
   @override
   void initState() {
@@ -2163,6 +2313,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _timer?.cancel();
     _solarTimer?.cancel();
     _izyLiveModeTimer?.cancel();
+    _capteursInfoTimer?.cancel();
+    _dailyPeaksTimer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
@@ -2410,7 +2562,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_solarRefreshInProgress) return; // cycle précédent encore en cours, on saute ce tick
     _solarRefreshInProgress = true;
     try {
-      // Izypower
+      // Isypower
       if (_izyClient != null) {
         // Aucun fallback : sans Station ID renseigné, on ne peut pas savoir
         // à quelle installation appartient l'utilisateur — interroger une
@@ -2490,7 +2642,7 @@ class _HomeScreenState extends State<HomeScreen> {
             }
 
             if (mounted) setState(() {
-              // Reconstruction complète (pas copyWith) pour la partie Izypower :
+              // Reconstruction complète (pas copyWith) pour la partie Isypower :
               // le refresh renvoie un jeu de données complet à chaque fois, donc
               // une valeur redevenue null (ex: remainingTime="-") doit bien
               // effacer l'ancienne valeur affichée, pas la conserver.
@@ -2510,7 +2662,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 apsystemsOk: _solarState.apsystemsOk,
                 apsystemsStatus: _solarState.apsystemsStatus,
                 // Idem Hoymiles Cloud / OpenDTU / météo — sans ça, elles seraient
-                // effacées à chaque cycle Izypower (10s), invisible pour Hoymiles/
+                // effacées à chaque cycle Isypower (10s), invisible pour Hoymiles/
                 // OpenDTU qui se re-remplissent dans le même cycle juste après,
                 // mais catastrophique pour la météo (rate-limit 20mn : resterait
                 // effacée pendant ~20mn avant le prochain vrai fetch).
@@ -2535,7 +2687,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 apEcuData: _solarState.apEcuData,
                 apEcuOk: _solarState.apEcuOk,
                 apEcuStatus: _solarState.apEcuStatus,
-                // Partie Izypower : toujours les valeurs fraîches, y compris null
+                // Partie Isypower : toujours les valeurs fraîches, y compris null
                 izySocPct: asDouble(data['battery_soc']),
                 izyBatteryPowerW: effectiveBattery,
                 izyPvW: pvTotalDetail ?? pvPower,
@@ -2753,13 +2905,46 @@ class _HomeScreenState extends State<HomeScreen> {
     _timer?.cancel();
     _solarTimer?.cancel();
     _izyLiveModeTimer?.cancel();
+    _capteursInfoTimer?.cancel();
+    _dailyPeaksTimer?.cancel();
+
+    // Infos fixes (version routeur, noms de sondes) — premier essai immédiat,
+    // peu importe la page affichée au (re)démarrage du polling (avant ce
+    // correctif, rester sur la page Suivi Solaire empêchait totalement cet
+    // appel, cf. retour anticipé de la branche solaire ci-dessous). Puis
+    // ré-essayé périodiquement (~5mn) : cet appel unique n'avait aucun filet
+    // de sécurité — un simple échec réseau ponctuel au démarrage (beaucoup
+    // d'appels concurrents à ce moment-là) le laissait introuvable pour toute
+    // la session, sans jamais se rattraper comme le fait le reste (rafraîchi
+    // en boucle). Cette info change rarement, un intervalle large suffit.
+    void fetchCapteurs() {
+      if (_displayMode == 'single') {
+        for (var i = 0; i < _espConfigs.length; i++) _fetchCapteursInfo(i);
+      } else {
+        _fetchCapteursInfo(_currentPage);
+      }
+    }
+    fetchCapteurs();
+    _capteursInfoTimer = Timer.periodic(const Duration(minutes: 5), (_) => fetchCapteurs());
+
+    // Pics de puissance du jour — payload lourd (600pts), volontairement pas
+    // sur le cycle rapide. ~2mn : suffisant pour rester à jour sans peser.
+    void fetchPeaks() {
+      if (_displayMode == 'single') {
+        for (var i = 0; i < _espConfigs.length; i++) _fetchDailyPeaks(i);
+      } else {
+        _fetchDailyPeaks(_currentPage);
+      }
+    }
+    fetchPeaks();
+    _dailyPeaksTimer = Timer.periodic(const Duration(minutes: 2), (_) => fetchPeaks());
 
     if (_isSolarPage(_currentPage)) {
-      // Page solaire affichée : seule elle est pollée
+      // Page solaire affichée : seule elle est pollée pour le reste (puissances)
       _refreshSolar();
       _solarTimer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshSolar());
 
-      // Active le "mode temps réel" Izypower tant que la page reste affichée.
+      // Active le "mode temps réel" Isypower tant que la page reste affichée.
       // Fenêtre serveur ~2mn (comme le toggle "Live mode" de l'app officielle) :
       // on relance avant expiration, avec une marge de sécurité (90s < 120s).
       if (_izyClient != null && _solarConfig.izypowerStationId.isNotEmpty) {
@@ -2773,7 +2958,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (_displayMode == 'single') {
       // Page ESP combinée : poll tous les ESPs
-      for (var i = 0; i < _espConfigs.length; i++) _fetchCapteursInfo(i);
       _refreshAll();
       _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshAll());
 
@@ -2785,7 +2969,6 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else {
       // Mode multi-pages : poll seulement l'ESP visible
-      _fetchCapteursInfo(_currentPage);
       _refreshEsp(_currentPage);
       _timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshEsp(_currentPage));
     }
@@ -2807,14 +2990,20 @@ class _HomeScreenState extends State<HomeScreen> {
           .timeout(const Duration(seconds: 8));
       final infos = parseCapteursInfo(body);
       String? routerVer;
+      String? dbg;
       String nomSonde1 = '';
       String nomSonde2 = '';
       String nomPpos   = 'Soutiré';
       String nomPneg   = 'Injecté';
       try {
         final data = jsonDecode(body) as Map<String, dynamic>;
-        final v = int.tryParse(data['VersionStocke']?.toString() ?? '');
-        if (v != null) routerVer = (v / 100).toStringAsFixed(2);
+        final rawVer = data['VersionStocke'];
+        final v = int.tryParse(rawVer?.toString() ?? '');
+        if (v != null) {
+          routerVer = (v / 100).toStringAsFixed(2);
+        } else {
+          dbg = 'VersionStocke absent/illisible (reçu: ${rawVer ?? "clé absente"})';
+        }
         nomSonde1 = (data['nomSondeMobile'] ?? '').toString();
         nomSonde2 = (data['nomSondeFixe']  ?? '').toString();
         nomPpos   = (data['nomSfixePpos']  ?? '').toString();
@@ -2824,18 +3013,55 @@ class _HomeScreenState extends State<HomeScreen> {
         if (source == 'Ext' || source == 'ShellyPro') nomSonde2 = '';
         // Si les deux labels pos et neg sont vides → pas de 2e sonde non plus
         if (nomPpos.isEmpty && nomPneg.isEmpty) nomSonde2 = '';
-      } catch (_) {}
+      } catch (e) {
+        dbg = 'Parsing JSON échoué : $e';
+      }
       if (mounted) setState(() {
         _espStates[idx] = _espStates[idx].copyWith(
           capteursInfo: infos,
           routerVersion: routerVer,
+          routerVersionDebug: dbg ?? 'OK',
           nomSonde1: nomSonde1,
           nomSonde2: nomSonde2,
           nomPpos: nomPpos,
           nomPneg: nomPneg,
         );
       });
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) setState(() {
+        _espStates[idx] = _espStates[idx].copyWith(
+          routerVersionDebug: 'Requête /ParaFixe échouée : $e',
+        );
+      });
+    }
+  }
+
+  // Pics de puissance du jour — vient du préfixe (chunks[0], jusqu'ici jamais
+  // exploité) de /ajax_histo48h. Cette réponse est lourde (600 points), donc
+  // volontairement PAS sur le cycle rapide (2-3s) comme le reste : timer dédié
+  // peu fréquent (voir _startPolling), on jette le reste du payload aussitôt
+  // le préfixe extrait.
+  Future<void> _fetchDailyPeaks(int idx) async {
+    if (idx >= _espConfigs.length) return;
+    final cfg = _espConfigs[idx];
+    final base = cfg.url.trimRight().replaceAll(RegExp(r'/$'), '');
+    final cookie = cfg.password.isNotEmpty ? 'CleAcces=${cfg.password}' : null;
+    try {
+      final body = await simpleGet('$base/ajax_histo48h', cookie: cookie)
+          .timeout(const Duration(seconds: 10));
+      final peaks = parseDailyPeaks(body);
+      if (mounted) setState(() {
+        _espStates[idx] = _espStates[idx].copyWith(
+          maxPwsToday:  peaks['maxPwsToday'],
+          maxPwiToday:  peaks['maxPwiToday'],
+          maxPwsTToday: peaks['maxPwsTToday'],
+          maxPwiTToday: peaks['maxPwiTToday'],
+        );
+      });
+    } catch (_) {
+      // Échec silencieux : donnée secondaire, pas de statut dédié — le
+      // prochain cycle du timer réessaiera naturellement.
+    }
   }
 
   Future<void> _refreshEsp(int idx) async {
@@ -2877,6 +3103,10 @@ class _HomeScreenState extends State<HomeScreen> {
           whJourInjecte:  energie['whJourInjecte'],
           whTotalSoutire: energie['whTotalSoutire'],
           whTotalInjecte: energie['whTotalInjecte'],
+          whJourSoutireT:  energie['whJourSoutireT'],
+          whJourInjecteT:  energie['whJourInjecteT'],
+          whTotalSoutireT: energie['whTotalSoutireT'],
+          whTotalInjecteT: energie['whTotalInjecteT'],
           tempoJour: tj,
           tempoJ1:   tj1,
           ok: true,
@@ -2985,6 +3215,7 @@ class _HomeScreenState extends State<HomeScreen> {
         currentMultiSites:  _multiSites,
         currentLabelColor:  _uiLabelColor,
         currentSolarConfig: _solarConfig,
+        currentEspStates: _espStates,
         onSave: (configs, orientation, displayMode, multiSites, labelColor, solarConfig) async {
           await _saveConfig(configs, orientation, displayMode, multiSites, labelColor, solarConfig);
           if (mounted) Navigator.pop(context);
@@ -3104,7 +3335,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildPowerCards(EspState state, {String phaseMode = 'mono'}) {
     // En triphasé, les retours de phase faussent Soutiré/Injecté pris isolément :
     // seul le NET (Soutiré - Injecté) du jour est pertinent, et "Injecté jour"
-    // n'a pas de sens à afficher séparément.
+    // n'a pas de sens à afficher séparément. Le pic n'est pas "net-able" (deux
+    // maxima instantanés à des moments différents) : on garde le pic brut de
+    // la phase Soutiré, on masque celui d'Injecté par cohérence avec whJour.
     final isTri = phaseMode == 'tri';
     double? soutireJour = state.whJourSoutire;
     double? injecteJour = state.whJourInjecte;
@@ -3116,11 +3349,11 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Expanded(child: PowerCard(label: 'Soutiré', value: state.pws,
             color: const Color(0xFFF43F5E), labelColor: appLabelColor,
-            whJour: soutireJour)),
+            whJour: soutireJour, maxToday: state.maxPwsToday)),
         const SizedBox(width: 10),
         Expanded(child: PowerCard(label: 'Injecté', value: state.pwi,
             color: const Color(0xFF22D3A8), labelColor: appLabelColor,
-            whJour: injecteJour)),
+            whJour: injecteJour, maxToday: isTri ? null : state.maxPwiToday)),
       ]),
     );
   }
@@ -3147,12 +3380,14 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(children: [
             if (state.nomPpos.isNotEmpty)
               Expanded(child: PowerCard(label: state.nomPpos,
-                  value: state.pwsT, color: const Color(0xFFF43F5E))),
+                  value: state.pwsT, color: const Color(0xFFF43F5E),
+                  whJour: state.whJourSoutireT, maxToday: state.maxPwsTToday)),
             if (state.nomPpos.isNotEmpty && state.nomPneg.isNotEmpty)
               const SizedBox(width: 10),
             if (state.nomPneg.isNotEmpty)
               Expanded(child: PowerCard(label: state.nomPneg,
-                  value: state.pwiT, color: const Color(0xFF22D3A8))),
+                  value: state.pwiT, color: const Color(0xFF22D3A8),
+                  whJour: state.whJourInjecteT, maxToday: state.maxPwiTToday)),
           ]),
       ],
     );
@@ -3175,6 +3410,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildStatus(EspState state) {
     final verStr = state.routerVersion != null
         ? 'v$appVersion · RMS ${state.routerVersion}'
+        : state.routerVersionDebug != null
+        ? 'v$appVersion · ⚠ ${state.routerVersionDebug}'
         : 'v$appVersion';
     return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       AnimatedContainer(
@@ -3550,8 +3787,21 @@ class _HomeScreenState extends State<HomeScreen> {
       Flexible(child: Text(statusTxt,
           style: TextStyle(fontSize: 11, color: appLabelColor, fontFamily: 'monospace'))),
       const SizedBox(width: 12),
-      Text('v$appVersion',
-          style: TextStyle(fontSize: 11, color: appLabelColor.withOpacity(0.7), fontFamily: 'monospace')),
+      Builder(builder: (_) {
+        // Version RMS affichée uniquement s'il n'y a qu'un seul ESP : avec
+        // plusieurs, des firmwares différents rendraient une version unique
+        // trompeuse (choix volontaire, pas un oubli).
+        final singleEsp = _espConfigs.length == 1;
+        final routerVer = singleEsp && _espStates.isNotEmpty ? _espStates.first.routerVersion : null;
+        final routerDbg = singleEsp && _espStates.isNotEmpty ? _espStates.first.routerVersionDebug : null;
+        final verStr = routerVer != null
+            ? 'v$appVersion · RMS $routerVer'
+            : routerDbg != null
+            ? 'v$appVersion · ⚠ $routerDbg'
+            : 'v$appVersion';
+        return Text(verStr,
+            style: TextStyle(fontSize: 11, color: appLabelColor.withOpacity(0.7), fontFamily: 'monospace'));
+      }),
     ]);
 
     Widget buildPortraitSingle() => Stack(children: [
@@ -3952,7 +4202,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Page suivi solaire (Izypower / Sunology) ────────────────────────────────
+  // ── Page suivi solaire (Isypower / Sunology) ────────────────────────────────
   Widget _buildSolarPage(BuildContext context) {
     final s = _solarState;
     final totalPv = _solarTotalPvW;
@@ -4060,7 +4310,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
         const SizedBox(height: 20),
 
-        // ── Section Izypower ──────────────────────────────────────────────────
+        // ── Section Isypower ──────────────────────────────────────────────────
         if (hasIzy) ...[
           _solarSectionHeader('IZYPOWER', const Color(0xFFF97316), s.izyOk, s.izyStatus),
           const SizedBox(height: 10),
@@ -4648,7 +4898,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Carte détail charge/décharge (source1/source2/temps restant), façon app Izypower
+  // Carte détail charge/décharge (source1/source2/temps restant), façon app Isypower
   Widget _chargeDetailCard({
     required String title, required IconData icon, required Color color,
     required String line1Label, required double? line1,
@@ -5132,7 +5382,7 @@ class PowerGaugeWidget extends StatelessWidget {
   }
 }
 
-// ── Icône batterie visuelle (style pile verticale, comme l'app Izypower) ──────
+// ── Icône batterie visuelle (style pile verticale, comme l'app Isypower) ──────
 class BatteryVisual extends StatelessWidget {
   final double? socPct; // 0-100, null = inconnu
   final double width, height;
@@ -5457,12 +5707,22 @@ class PowerCard extends StatelessWidget {
   final double value;
   final Color  color;
   final Color  labelColor;
-  final double? whJour; // cumul du jour en Wh, si dispo (ex: Shelly EM en 2e sonde)
+  final double? whJour;   // cumul du jour en Wh, si dispo (ex: Shelly EM en 2e sonde)
+  final double? maxToday; // pic de puissance du jour en W (remis à 0 à minuit
+  // côté firmware) — dispo pour tous, indépendamment du whJour
   const PowerCard({super.key, required this.label, required this.value,
-    required this.color, this.labelColor = const Color(0xFF5A6278), this.whJour});
+    required this.color, this.labelColor = const Color(0xFF5A6278),
+    this.whJour, this.maxToday});
 
   @override
   Widget build(BuildContext context) {
+    String fmtW(double w) => w >= 1000 ? '${(w / 1000).toStringAsFixed(2)} kW' : '${w.round()} W';
+    final kwhLine = whJour != null
+        ? (whJour! >= 1000
+        ? '${(whJour! / 1000).toStringAsFixed(1)} kWh aujourd\'hui'
+        : '${whJour!.round()} Wh aujourd\'hui')
+        : null;
+    final picLine = maxToday != null ? 'Pic : ${fmtW(maxToday!)}' : null;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -5496,14 +5756,15 @@ class PowerCard extends StatelessWidget {
                   style: TextStyle(fontSize: 11, color: labelColor, fontFamily: 'monospace')),
             ],
           ),
-          if (whJour != null) ...[
+          if (kwhLine != null) ...[
             const SizedBox(height: 2),
-            Text(
-              whJour! >= 1000
-                  ? '${(whJour! / 1000).toStringAsFixed(1)} kWh aujourd\'hui'
-                  : '${whJour!.round()} Wh aujourd\'hui',
-              style: TextStyle(fontSize: 10, color: labelColor, fontFamily: 'monospace'),
-            ),
+            Text(kwhLine,
+                style: TextStyle(fontSize: 10, color: labelColor, fontFamily: 'monospace')),
+          ],
+          if (picLine != null) ...[
+            const SizedBox(height: 2),
+            Text(picLine,
+                style: TextStyle(fontSize: 10, color: labelColor, fontFamily: 'monospace')),
           ],
         ],
       ),
@@ -5677,6 +5938,7 @@ class ConfigSheet extends StatefulWidget {
   final bool   currentMultiSites;
   final Color  currentLabelColor;
   final SolarConfig currentSolarConfig;
+  final List<EspState> currentEspStates; // pour reprendre la version RMS déjà connue
   final Future<void> Function(List<EspConfig>, String, String, bool, Color, SolarConfig) onSave;
   const ConfigSheet({
     super.key,
@@ -5686,6 +5948,7 @@ class ConfigSheet extends StatefulWidget {
     required this.currentMultiSites,
     required this.currentLabelColor,
     required this.currentSolarConfig,
+    required this.currentEspStates,
     required this.onSave,
   });
 
@@ -5747,11 +6010,15 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late List<List<_ModuleChoice>?> _testedModules; // null=non testé, []= échec
   late List<List<_TempChoice>?>   _testedTemps;   // null=non testé, []= aucun capteur
   late List<bool> _testing;
+  late List<bool> _diagLoading;
+  late List<EspDiagnostic?> _diagResult;
+  late List<String?> _diagError;
   // Distingue un VRAI échec (exception réseau) d'un succès légitime sur un
   // routeur sans action configurée (ex: monitoring pur, sans chauffe-eau/
   // radiateur à piloter) — les deux donnaient auparavant _testedModules=[]
   // de façon indiscernable, faisant afficher "Connexion échouée" à tort.
   late List<bool> _testFailed;
+  late List<String?> _routerVersionDbg; // diagnostic VersionStocke, par ESP testé
   late List<String> _phaseModes; // 'mono' ou 'tri' par ESP
 
   @override
@@ -5806,7 +6073,11 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _testedModules = List.generate(_count, (_) => null);
     _testedTemps   = List.generate(_count, (_) => null);
     _testing       = List.generate(_count, (_) => false);
+    _diagLoading   = List.generate(_count, (_) => false);
+    _diagResult    = List.generate(_count, (_) => null);
+    _diagError     = List.generate(_count, (_) => null);
     _testFailed    = List.generate(_count, (_) => false);
+    _routerVersionDbg = List.generate(_count, (_) => null);
     _phaseModes    = List.generate(_count, (i) =>
     i < widget.currentConfigs.length ? widget.currentConfigs[i].phaseMode : 'mono');
 
@@ -5861,7 +6132,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     }
   }
 
-  Future<void> _testIzypower() async {
+  Future<void> _testIsypower() async {
     setState(() { _izyTesting = true; _izyTestResult = null; });
     final stationId = _izyStationCtrl.text.trim();
     if (stationId.isEmpty) {
@@ -6227,6 +6498,10 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testing.add(false);
       _phaseModes.add('mono');
       _testFailed.add(false);
+      _routerVersionDbg.add(null);
+      _diagLoading.add(false);
+      _diagResult.add(null);
+      _diagError.add(null);
     });
   }
 
@@ -6240,6 +6515,10 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testing.removeLast();
       _phaseModes.removeLast();
       _testFailed.removeLast();
+      _routerVersionDbg.removeLast();
+      _diagLoading.removeLast();
+      _diagResult.removeLast();
+      _diagError.removeLast();
       _count--;
     });
   }
@@ -6261,6 +6540,21 @@ class _ConfigSheetState extends State<ConfigSheet> {
 
       final modules  = parseActionneurs(results[0]);
       final capteurs = parseCapteursInfo(results[1]);
+
+      // Diagnostic version routeur (chemin de test indépendant de l'écran
+      // principal, pour isoler si le souci est réseau/format ou spécifique
+      // à la logique de _HomeScreenState).
+      String? verDbg;
+      try {
+        final data = jsonDecode(results[1]) as Map<String, dynamic>;
+        final rawVer = data['VersionStocke'];
+        final v = int.tryParse(rawVer?.toString() ?? '');
+        verDbg = v != null
+            ? 'Version routeur : ${(v / 100).toStringAsFixed(2)}'
+            : 'VersionStocke absent/illisible (reçu: ${rawVer ?? "clé absente"})';
+      } catch (e) {
+        verDbg = 'Parsing JSON échoué : $e';
+      }
 
       final existingEnabled = idx < widget.currentConfigs.length
           ? widget.currentConfigs[idx].enabledNumActions
@@ -6290,6 +6584,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
         _testedTemps[idx] = tempChoices;
         _testing[idx] = false;
         _testFailed[idx] = false; // succès, même si 0 action trouvée
+        _routerVersionDbg[idx] = verDbg;
       });
     } catch (_) {
       setState(() {
@@ -6299,6 +6594,109 @@ class _ConfigSheetState extends State<ConfigSheet> {
         _testFailed[idx]    = true; // vrai échec (exception réseau/timeout)
       });
     }
+  }
+
+  Future<void> _fetchDiagnostic(int idx) async {
+    setState(() { _diagLoading[idx] = true; _diagError[idx] = null; });
+    final url = _ctrls[idx]['url']!.text.trim().replaceAll(RegExp(r'/$'), '');
+    final cookie = _ctrls[idx]['pwd']!.text.isNotEmpty
+        ? 'CleAcces=${_ctrls[idx]['pwd']!.text}' : null;
+    try {
+      final body = await simpleGet('$url/ajax_dataESP32', cookie: cookie)
+          .timeout(const Duration(seconds: 10));
+      final diag = parseEspDiagnostic(body);
+      if (diag == null) throw Exception('Réponse illisible');
+      setState(() {
+        _diagResult[idx] = diag;
+        _diagLoading[idx] = false;
+      });
+      // Version RMS déjà récupérée par ailleurs (_fetchCapteursInfo, écran
+      // principal) — reprise ici plutôt que re-interrogée, pour ne pas
+      // dupliquer un appel réseau juste pour une info déjà en main.
+      final routerVer = idx < widget.currentEspStates.length
+          ? widget.currentEspStates[idx].routerVersion : null;
+      if (mounted) _showDiagnosticDialog(diag, routerVer);
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _diagError[idx] = msg;
+        _diagLoading[idx] = false;
+      });
+    }
+  }
+
+  String _formatDiagnosticText(EspDiagnostic d, String? routerVer) {
+    final buf = StringBuffer();
+    buf.writeln('── Diagnostic routeur F1ATB ──');
+    if (routerVer != null) buf.writeln('Version RMS : $routerVer');
+    if (d.uptimeHours != null) {
+      final days = (d.uptimeHours! / 24).floor();
+      final hours = (d.uptimeHours! % 24).floor();
+      buf.writeln('Uptime : ${days}j ${hours}h');
+    }
+    buf.writeln('Connexion : ${d.isEthernet ? "Ethernet" : "WiFi"}');
+    if (!d.isEthernet) {
+      if (d.wifiRssi != null) buf.writeln('RSSI WiFi : ${d.wifiRssi} dBm');
+      if (d.ssid != null && d.ssid!.isNotEmpty) buf.writeln('SSID : ${d.ssid}');
+    }
+    if (d.localIp != null) buf.writeln('IP locale : ${d.localIp}');
+    if (d.gatewayIp != null) buf.writeln('Passerelle : ${d.gatewayIp}');
+    if (d.mac != null) buf.writeln('MAC : ${d.mac}');
+    if (d.heapCurrent != null && d.heapMin != null) {
+      buf.writeln('Mémoire libre : ${(d.heapCurrent! / 1024).toStringAsFixed(0)} Ko '
+          '(min. jamais atteint : ${(d.heapMin! / 1024).toStringAsFixed(0)} Ko)');
+    }
+    if (d.coeur0 != null) buf.writeln('Timing mesure (min/moy/max ms) : ${d.coeur0}');
+    if (d.coeur1 != null) buf.writeln('Timing boucle (min/moy/max ms) : ${d.coeur1}');
+    if (d.syncMode != null) buf.writeln('Synchronisation : ${d.syncMode}');
+    if (d.triacInfo != null) buf.writeln('Triac : ${d.triacInfo}');
+    if (d.nbrDS18B20 != null) buf.writeln('Sondes DS18B20 détectées : ${d.nbrDS18B20}');
+    if (d.messages.isNotEmpty) {
+      buf.writeln();
+      buf.writeln('Derniers messages système :');
+      for (final m in d.messages) buf.writeln('• $m');
+    }
+    if (d.rmsEntries.isNotEmpty) {
+      buf.writeln();
+      buf.writeln('Routeurs distants :');
+      for (final r in d.rmsEntries) buf.writeln('• $r');
+    }
+    return buf.toString();
+  }
+
+  void _showDiagnosticDialog(EspDiagnostic d, String? routerVer) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF111827),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Diagnostic routeur',
+            style: TextStyle(color: Color(0xFFE8EAF0), fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(_formatDiagnosticText(d, routerVer),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12,
+                    color: Color(0xFFE8EAF0))),
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: _formatDiagnosticText(d, routerVer)));
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Diagnostic copié')));
+            },
+            icon: const Icon(Icons.copy, size: 16, color: Color(0xFF3B82F6)),
+            label: const Text('Copier', style: TextStyle(color: Color(0xFF3B82F6))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('Fermer', style: TextStyle(color: appLabelColor)),
+          ),
+        ],
+      ),
+    );
   }
 
   InputDecoration _inputDeco(String hint) => InputDecoration(
@@ -6492,6 +6890,48 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 ),
               ),
 
+              // ── Bouton Diagnostic routeur ─────────────────────────────────
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _diagLoading[i] ? null : () => _fetchDiagnostic(i),
+                  icon: _diagLoading[i]
+                      ? SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: appLabelColor))
+                      : Icon(Icons.monitor_heart_outlined,
+                      size: 16, color: appLabelColor),
+                  label: Text(
+                    _diagLoading[i] ? 'Récupération…' : 'Diagnostic routeur',
+                    style: TextStyle(fontSize: 13, color: appLabelColor),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(color: appLabelColor.withOpacity(0.4), width: 0.5),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
+              if (_diagError[i] != null) ...[
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF450A0A),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFF43F5E).withOpacity(0.4)),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.error_outline, size: 14, color: Color(0xFFF43F5E)),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text('Diagnostic : ${_diagError[i]}',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFFF43F5E)))),
+                  ]),
+                ),
+              ],
+
               // ── Résultat du test ───────────────────────────────────────────
               if (_testedModules[i] != null) ...[
                 const SizedBox(height: 8),
@@ -6531,6 +6971,11 @@ class _ConfigSheetState extends State<ConfigSheet> {
                           style: const TextStyle(fontSize: 12, color: Color(0xFF22C55E)))),
                     ]),
                   ),
+                  if (_routerVersionDbg[i] != null) ...[
+                    const SizedBox(height: 4),
+                    Text('Diagnostic : ${_routerVersionDbg[i]}',
+                        style: TextStyle(fontSize: 11, color: appLabelColor)),
+                  ],
                   const SizedBox(height: 4),
                   for (final m in _testedModules[i]!)
                     CheckboxListTile(
@@ -6587,7 +7032,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
               onChanged: (v) => setState(() => _solarEnabled = v!),
               title: const Text('Suivi solaire',
                   style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
-              subtitle: const Text('Ajoute un onglet Izypower / Sunology',
+              subtitle: const Text('Ajoute un onglet Isypower / Sunology',
                   style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
               activeColor: const Color(0xFFF97316),
               side: BorderSide(color: Colors.white.withOpacity(0.3)),
@@ -6609,11 +7054,12 @@ class _ConfigSheetState extends State<ConfigSheet> {
               const Text('Calibre la jauge de production totale sur l\'onglet solaire',
                   style: TextStyle(fontSize: 11, color: Color(0xFF5A6278))),
               const SizedBox(height: 12),
-              // Izypower
+              // Rebrandé "Isypower" par le fournisseur (ex-Izypower) — texte
+              // affiché uniquement, noms internes de variables/classes inchangés
               CheckboxListTile(
                 value: _izypowerEnabled,
                 onChanged: (v) => setState(() => _izypowerEnabled = v!),
-                title: const Text('Izypower',
+                title: const Text('Isypower',
                     style: TextStyle(fontSize: 13, color: Color(0xFFE8EAF0))),
                 activeColor: const Color(0xFFF97316),
                 side: BorderSide(color: Colors.white.withOpacity(0.3)),
@@ -6625,7 +7071,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 TextField(
                   controller: _izyEmailCtrl,
                   style: const TextStyle(fontSize: 13, color: Color(0xFFE8EAF0)),
-                  decoration: _inputDeco('Email Izypower'),
+                  decoration: _inputDeco('Email Isypower'),
                 ),
                 const SizedBox(height: 8),
                 TextField(
@@ -6696,7 +7142,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
-                    onPressed: _izyTesting ? null : _testIzypower,
+                    onPressed: _izyTesting ? null : _testIsypower,
                     icon: _izyTesting
                         ? const SizedBox(width: 14, height: 14,
                         child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF97316)))
