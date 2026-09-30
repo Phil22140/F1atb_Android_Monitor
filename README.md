@@ -90,6 +90,8 @@ v4.13.0 - Energie jour/total 2e sonde, pic de puissance du jour, diagnostic rout
 
 v4.13.2 - Ajout détail irradiance sur suivi météo h/h - Rebranding Izypower en Isypower
 
+v4.14.3 - Icônes météo dédiées (weather_icons_animated), choix animées/statiques
+
 --------
 
 
