@@ -14,6 +14,7 @@ RSAPublicKey, PKCS1Encoding, RSAEngine, PublicKeyParameter,
 CBCBlockCipher, AESEngine, ParametersWithIV, KeyParameter,
 MD5Digest, SHA256Digest, HMac;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:weather_icons_animated/weather_icons_animated.dart';
 
 // ── Client HTTP natif, plus permissif que le package http ─────────────────────
 Future<String> simpleGet(String url, {String? cookie}) async {
@@ -42,7 +43,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.13.2';
+const String appVersion = '4.14.3';
 const String RS = '\x1e'; // Record Separator
 const String US = '\x1f'; // Unit Separator
 const String ES = '\x1b'; // ESC Separator (nommage firmware, pas le caractère ASCII "ES" standard)
@@ -399,6 +400,7 @@ class SolarConfig {
   final bool meteoEnabled;
   final double? meteoLat, meteoLon;
   final String meteoLocationName; // nom affiché (ville géocodée, ou "coordonnées perso")
+  final bool meteoIconsAnimated; // true=fill animé (Lottie), false=monochrome teinté
   final bool apEmaEnabled;
   final String apEmaAppId, apEmaAppSecret, apEmaSid;
   final bool apEcuEnabled;
@@ -429,6 +431,7 @@ class SolarConfig {
     this.meteoLat,
     this.meteoLon,
     this.meteoLocationName = '',
+    this.meteoIconsAnimated = true,
     this.apEmaEnabled = false,
     this.apEmaAppId = '',
     this.apEmaAppSecret = '',
@@ -446,6 +449,7 @@ class SolarConfig {
     bool? hoymilesEnabled, String? hoymilesUsername, String? hoymilesPassword,
     bool? openDtuEnabled, String? openDtuMode, String? openDtuDirectUrl, String? openDtuRouterEspName,
     bool? meteoEnabled, double? meteoLat, double? meteoLon, String? meteoLocationName,
+    bool? meteoIconsAnimated,
     bool? apEmaEnabled, String? apEmaAppId, String? apEmaAppSecret, String? apEmaSid,
     bool? apEcuEnabled, String? apEcuIp,
     double? totalCapacityW,
@@ -475,6 +479,7 @@ class SolarConfig {
       meteoLat: meteoLat ?? this.meteoLat,
       meteoLon: meteoLon ?? this.meteoLon,
       meteoLocationName: meteoLocationName ?? this.meteoLocationName,
+      meteoIconsAnimated: meteoIconsAnimated ?? this.meteoIconsAnimated,
       apEmaEnabled: apEmaEnabled ?? this.apEmaEnabled,
       apEmaAppId: apEmaAppId ?? this.apEmaAppId,
       apEmaAppSecret: apEmaAppSecret ?? this.apEmaAppSecret,
@@ -510,6 +515,7 @@ class SolarConfig {
     'meteo_lat': meteoLat,
     'meteo_lon': meteoLon,
     'meteo_location_name': meteoLocationName,
+    'meteo_icons_animated': meteoIconsAnimated,
     'apema_enabled': apEmaEnabled,
     'apema_app_id': apEmaAppId,
     'apema_app_secret': apEmaAppSecret,
@@ -544,6 +550,7 @@ class SolarConfig {
     meteoLat: (j['meteo_lat'] as num?)?.toDouble(),
     meteoLon: (j['meteo_lon'] as num?)?.toDouble(),
     meteoLocationName: j['meteo_location_name'] as String? ?? '',
+    meteoIconsAnimated: j['meteo_icons_animated'] as bool? ?? true,
     apEmaEnabled: j['apema_enabled'] as bool? ?? false,
     apEmaAppId: j['apema_app_id'] as String? ?? '',
     apEmaAppSecret: j['apema_app_secret'] as String? ?? '',
@@ -1750,19 +1757,38 @@ class OpenMeteoClient {
   }
 }
 
-// Icônes Material (sûres, présentes de longue date) pour les codes météo WMO.
-IconData weatherIconFor(int? code, {bool isDay = true}) {
-  if (code == null) return Icons.help_outline;
-  if (code == 0) return isDay ? Icons.wb_sunny : Icons.nightlight_round;
-  if (code <= 3) return isDay ? Icons.wb_cloudy : Icons.cloud;
-  if (code == 45 || code == 48) return Icons.blur_on; // brouillard
-  if (code >= 51 && code <= 57) return Icons.grain; // bruine
-  if (code >= 61 && code <= 67) return Icons.umbrella; // pluie
-  if (code >= 71 && code <= 77) return Icons.ac_unit; // neige
-  if (code >= 80 && code <= 82) return Icons.umbrella; // averses
-  if (code >= 85 && code <= 86) return Icons.ac_unit; // averses de neige
-  if (code >= 95) return Icons.flash_on; // orage
-  return Icons.help_outline;
+// Icônes météo dédiées (package weather_icons_animated, jeu Meteocons) —
+// mapping code WMO → icône géré en interne par le package, avec un état par
+// code (pluie légère/forte, bruine, verglaçant, orage simple/extrême...)
+// plutôt que les quelques Material Icons génériques qu'on bricolait avant.
+// animated=true : style "fill" en Lottie (couleurs propres à chaque état,
+// figées par le package — peu lisible pour certains états sur fond sombre).
+// animated=false : style "monochrome" (statique uniquement, pas de Lottie
+// disponible pour ce style), teinté avec la couleur de texte choisie par
+// l'utilisateur (appLabelColor) — lisibilité garantie quel que soit l'état.
+Widget weatherIconWidget(int? code, {
+  bool isDay = true, double size = 40,
+  bool animated = true, Color? monoColor,
+}) {
+  if (code == null) {
+    return Icon(Icons.help_outline, size: size,
+        color: animated ? const Color(0xFFFACC15) : monoColor);
+  }
+  if (animated) {
+    return WeatherIcon(
+      icon: WeatherIcons.fromOpenMeteoCode(code, isDay: isDay),
+      style: WeatherIconStyle.fill,
+      format: WeatherIconFormat.lottie,
+      size: size,
+    );
+  }
+  return WeatherIcon(
+    icon: WeatherIcons.fromOpenMeteoCode(code, isDay: isDay),
+    style: WeatherIconStyle.monochrome,
+    format: WeatherIconFormat.svgAnimated,
+    size: size,
+    color: monoColor,
+  );
 }
 
 // ── Client APsystems via EMA OpenAPI (API officielle, différente d'EasyPower/EZ1) ──
@@ -3698,7 +3724,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(children: [
             _weatherSummaryCard(
               label: 'AUJOURD\'HUI',
-              icon: weatherIconFor(weather.currentWeatherCode ?? weather.dailyToday?.weatherCode, isDay: true),
+              weatherCode: weather.currentWeatherCode ?? weather.dailyToday?.weatherCode, isDay: true,
               temp: weather.currentTempC,
               tempSuffix: '',
               irradiance: _currentOrNearestIrradiance(weather.hoursToday),
@@ -3707,7 +3733,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(width: 8),
             _weatherSummaryCard(
               label: 'DEMAIN',
-              icon: weatherIconFor(weather.dailyTomorrow?.weatherCode, isDay: true),
+              weatherCode: weather.dailyTomorrow?.weatherCode, isDay: true,
               temp: _daytimeAvg(weather.hoursTomorrow, (h) => h.tempC),
               tempSuffix: ' (moy)',
               irradiance: _dayMaxIrradiance(weather.hoursTomorrow),
@@ -4042,7 +4068,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(children: [
             _weatherSummaryCard(
               label: 'AUJOURD\'HUI',
-              icon: weatherIconFor(weather.currentWeatherCode ?? weather.dailyToday?.weatherCode, isDay: true),
+              weatherCode: weather.currentWeatherCode ?? weather.dailyToday?.weatherCode, isDay: true,
               temp: weather.currentTempC,
               tempSuffix: '',
               irradiance: _currentOrNearestIrradiance(weather.hoursToday),
@@ -4054,7 +4080,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(width: 10),
             _weatherSummaryCard(
               label: 'DEMAIN',
-              icon: weatherIconFor(weather.dailyTomorrow?.weatherCode, isDay: true),
+              weatherCode: weather.dailyTomorrow?.weatherCode, isDay: true,
               temp: _daytimeAvg(weather.hoursTomorrow, (h) => h.tempC),
               tempSuffix: ' (moy)',
               irradiance: _dayMaxIrradiance(weather.hoursTomorrow),
@@ -4115,7 +4141,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // Carte résumé compacte (aujourd'hui ou demain) — tap pour développer le
   // détail heure par heure juste en dessous.
   Widget _weatherSummaryCard({
-    required String label, required IconData icon,
+    required String label, required int? weatherCode, bool isDay = true,
     required double? temp, required String tempSuffix,
     required double? irradiance, required String irradianceLabel,
     bool expanded = false, VoidCallback? onTap,
@@ -4135,7 +4161,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
                 letterSpacing: 1, color: appLabelColor)),
             const SizedBox(height: 6),
-            Icon(icon, color: const Color(0xFFFACC15), size: 28),
+            weatherIconWidget(weatherCode, isDay: isDay, size: 40,
+                animated: _solarConfig.meteoIconsAnimated, monoColor: appLabelColor),
             const SizedBox(height: 6),
             Text(temp != null ? '${temp.round()}°C$tempSuffix' : '--',
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
@@ -4171,8 +4198,22 @@ class _HomeScreenState extends State<HomeScreen> {
               Text('${h.time.hour.toString().padLeft(2, '0')}h',
                   style: TextStyle(fontSize: 10, color: appLabelColor)),
               const SizedBox(height: 4),
-              Icon(weatherIconFor(h.weatherCode, isDay: h.isDay),
-                  size: 20, color: const Color(0xFFFACC15)),
+              // Fond clair derrière l'icône, utile seulement en mode animé
+              // (couleurs figées par état, parfois peu lisibles sur fond
+              // sombre) — inutile, voire nuisible, en monochrome où la
+              // teinte est déjà choisie pour bien ressortir sur ce fond.
+              _solarConfig.meteoIconsAnimated
+                  ? Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.25),
+                  shape: BoxShape.circle,
+                ),
+                child: weatherIconWidget(h.weatherCode, isDay: h.isDay, size: 40,
+                    animated: true),
+              )
+                  : weatherIconWidget(h.weatherCode, isDay: h.isDay, size: 40,
+                  animated: false, monoColor: appLabelColor),
               const SizedBox(height: 4),
               Text(h.tempC != null ? '${h.tempC!.round()}°' : '--',
                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
@@ -5982,6 +6023,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late bool _meteoEnabled;
   late TextEditingController _meteoCityCtrl, _meteoLatCtrl, _meteoLonCtrl;
   late String _meteoLocationName;
+  late bool _meteoIconsAnimated;
   bool _meteoSearching = false;
   String? _meteoSearchError;
   List<OpenMeteoGeocodingResult>? _meteoResults;
@@ -6059,6 +6101,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _openDtuUrlCtrl   = TextEditingController(text: sc.openDtuDirectUrl);
     _meteoEnabled     = sc.meteoEnabled;
     _meteoLocationName = sc.meteoLocationName;
+    _meteoIconsAnimated = sc.meteoIconsAnimated;
     _meteoCityCtrl    = TextEditingController();
     _meteoLatCtrl     = TextEditingController(text: sc.meteoLat?.toString() ?? '');
     _meteoLonCtrl     = TextEditingController(text: sc.meteoLon?.toString() ?? '');
@@ -7787,6 +7830,44 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     ),
                   ),
                 ]),
+                const SizedBox(height: 10),
+                Text('Icônes météo',
+                    style: TextStyle(fontSize: 10, color: appLabelColor)),
+                const SizedBox(height: 4),
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0A0F1A),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                  ),
+                  child: Row(children: [
+                    for (final opt in const [(true, '✨ Animées'), (false, '◐ Statiques')])
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () => setState(() => _meteoIconsAnimated = opt.$1),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            decoration: BoxDecoration(
+                              color: _meteoIconsAnimated == opt.$1
+                                  ? const Color(0xFF3B82F6) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(11),
+                            ),
+                            child: Text(opt.$2, textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                    color: _meteoIconsAnimated == opt.$1 ? Colors.white : appLabelColor)),
+                          ),
+                        ),
+                      ),
+                  ]),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _meteoIconsAnimated
+                      ? 'Couleurs propres à chaque état, parfois peu lisibles sur fond sombre'
+                      : 'Teintées avec la couleur de texte de l\'app — lisibilité garantie',
+                  style: TextStyle(fontSize: 10, color: appLabelColor),
+                ),
               ],
             ],
             const SizedBox(height: 16),
@@ -7910,6 +7991,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     meteoLat: double.tryParse(_meteoLatCtrl.text.trim().replaceAll(',', '.')),
                     meteoLon: double.tryParse(_meteoLonCtrl.text.trim().replaceAll(',', '.')),
                     meteoLocationName: _meteoLocationName,
+                    meteoIconsAnimated: _meteoIconsAnimated,
                     apEmaEnabled: _apEmaEnabled,
                     apEmaAppId: _apEmaAppIdCtrl.text.trim(),
                     apEmaAppSecret: _apEmaAppSecretCtrl.text.trim(),
