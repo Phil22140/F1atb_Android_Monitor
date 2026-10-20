@@ -92,6 +92,8 @@ v4.13.2 - Ajout détail irradiance sur suivi météo h/h - Rebranding Izypower e
 
 v4.14.3 - Icônes météo dédiées (weather_icons_animated), choix animées/statiques
 
+v4.15.0 - fix hauteur bande horaire météo (irradiance coupée) + option Forçage disponible par ESP
+
 --------
 
 
