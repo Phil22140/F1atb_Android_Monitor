@@ -43,7 +43,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.14.3';
+const String appVersion = '4.15.0';
 const String RS = '\x1e'; // Record Separator
 const String US = '\x1f'; // Unit Separator
 const String ES = '\x1b'; // ESC Separator (nommage firmware, pas le caractère ASCII "ES" standard)
@@ -2142,6 +2142,7 @@ class EspConfig {
   final List<int>? enabledNumActions;   // null=tout afficher, []=aucune, [0,1]=filtrés
   final List<int>? enabledTempIndices;  // null=tout afficher, []=aucun, [0,2]=filtrés
   final String phaseMode; // 'mono' ou 'tri' — réseau monophasé ou triphasé
+  final bool forcageDisponible; // false=masque le bloc Forçage (usage monitoring seul, sans relais à piloter)
   const EspConfig({
     required this.name,
     required this.url,
@@ -2149,6 +2150,7 @@ class EspConfig {
     this.enabledNumActions,
     this.enabledTempIndices,
     this.phaseMode = 'mono',
+    this.forcageDisponible = true,
   });
 }
 
@@ -2384,6 +2386,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ? (c['enabled_temps'] as List?)?.cast<int>()
                 : null,
             phaseMode: (c['phase_mode'] as String?) ?? 'mono',
+            forcageDisponible: (c['forcage_disponible'] as bool?) ?? true,
           ));
         }
       }
@@ -2497,6 +2500,7 @@ class _HomeScreenState extends State<HomeScreen> {
           if (c.enabledNumActions  != null) map['enabled']       = c.enabledNumActions;
           if (c.enabledTempIndices != null) map['enabled_temps'] = c.enabledTempIndices;
           map['phase_mode'] = c.phaseMode;
+          map['forcage_disponible'] = c.forcageDisponible;
           return map;
         }).toList(),
       });
@@ -4184,7 +4188,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final visible = hours.where((h) => h.time.isAfter(now.subtract(const Duration(hours: 1)))).toList();
     if (visible.isEmpty) return const SizedBox.shrink();
     return SizedBox(
-      height: 104,
+      height: 122,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: visible.length,
@@ -5129,11 +5133,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     _buildPowerCards(state, phaseMode: cfg.phaseMode),
                   ]),
                 ),
-                const SizedBox(height: 12),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: _buildForceWidget(state, espIdx, selected, multiModules),
-                ),
+                if (cfg.forcageDisponible) ...[
+                  const SizedBox(height: 12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: _buildForceWidget(state, espIdx, selected, multiModules),
+                  ),
+                ],
                 const SizedBox(height: 10),
                 if (state.nomSonde2.isNotEmpty) ...[
                   Padding(
@@ -5207,8 +5213,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 6),
                   ],
                   _buildPowerCards(state, phaseMode: cfg.phaseMode),
-                  const SizedBox(height: 12),
-                  _buildForceWidget(state, espIdx, selected, multiModules),
+                  if (cfg.forcageDisponible) ...[
+                    const SizedBox(height: 12),
+                    _buildForceWidget(state, espIdx, selected, multiModules),
+                  ],
                   const SizedBox(height: 10),
                   if (state.nomSonde2.isNotEmpty) ...[
                     _buildSecondeSonde(state),
@@ -6067,6 +6075,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late List<bool> _testFailed;
   late List<String?> _routerVersionDbg; // diagnostic VersionStocke, par ESP testé
   late List<String> _phaseModes; // 'mono' ou 'tri' par ESP
+  late List<bool> _forcageDisponibles; // true=affiche le bloc Forçage, false=monitoring seul
 
   @override
   void initState() {
@@ -6128,6 +6137,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _routerVersionDbg = List.generate(_count, (_) => null);
     _phaseModes    = List.generate(_count, (i) =>
     i < widget.currentConfigs.length ? widget.currentConfigs[i].phaseMode : 'mono');
+    _forcageDisponibles = List.generate(_count, (i) =>
+    i < widget.currentConfigs.length ? widget.currentConfigs[i].forcageDisponible : true);
 
     // Auto-test au chargement pour les ESPs déjà configurés (URL présente)
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -6545,6 +6556,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testedTemps.add(null);
       _testing.add(false);
       _phaseModes.add('mono');
+      _forcageDisponibles.add(true);
       _testFailed.add(false);
       _routerVersionDbg.add(null);
       _diagLoading.add(false);
@@ -6562,6 +6574,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
       _testedTemps.removeLast();
       _testing.removeLast();
       _phaseModes.removeLast();
+      _forcageDisponibles.removeLast();
       _testFailed.removeLast();
       _routerVersionDbg.removeLast();
       _diagLoading.removeLast();
@@ -6910,6 +6923,44 @@ class _ConfigSheetState extends State<ConfigSheet> {
               if (_phaseModes[i] == 'tri') ...[
                 const SizedBox(height: 4),
                 Text('En triphasé, "Soutiré jour" = Soutiré − Injecté (retours de phase), "Injecté jour" masqué',
+                    style: TextStyle(fontSize: 10, color: appLabelColor)),
+              ],
+              const SizedBox(height: 10),
+
+              // ── Forçage disponible (masque le bloc si pas de relais à piloter) ──
+              Text('Forçage',
+                  style: TextStyle(fontSize: 12, color: appLabelColor)),
+              const SizedBox(height: 4),
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0A0F1A),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white.withOpacity(0.08)),
+                ),
+                child: Row(children: [
+                  for (final opt in const [(true, 'Disponible'), (false, 'Monitoring seul')])
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() => _forcageDisponibles[i] = opt.$1),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          decoration: BoxDecoration(
+                            color: _forcageDisponibles[i] == opt.$1
+                                ? const Color(0xFFF97316) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(11),
+                          ),
+                          child: Text(opt.$2, textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                  color: _forcageDisponibles[i] == opt.$1 ? Colors.white : appLabelColor)),
+                        ),
+                      ),
+                    ),
+                ]),
+              ),
+              if (!_forcageDisponibles[i]) ...[
+                const SizedBox(height: 4),
+                Text('Masque le bloc Forçage sur cet ESP (pas de relais/action à piloter)',
                     style: TextStyle(fontSize: 10, color: appLabelColor)),
               ],
               const SizedBox(height: 10),
@@ -7959,6 +8010,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                       enabledNumActions:  enabled,
                       enabledTempIndices: enabledTemps,
                       phaseMode: _phaseModes[i],
+                      forcageDisponible: _forcageDisponibles[i],
                     );
                   }).toList();
                   final solarConfig = SolarConfig(
