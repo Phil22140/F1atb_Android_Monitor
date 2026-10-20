@@ -94,6 +94,8 @@ v4.14.3 - Icônes météo dédiées (weather_icons_animated), choix animées/sta
 
 v4.15.0 - fix hauteur bande horaire météo (irradiance coupée) + option Forçage disponible par ESP
 
+v4.15.1 - fix option Forçage disponible par ESP
+
 --------
 
 
