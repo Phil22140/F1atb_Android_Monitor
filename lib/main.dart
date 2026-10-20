@@ -43,7 +43,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.15.0';
+const String appVersion = '4.15.1';
 const String RS = '\x1e'; // Record Separator
 const String US = '\x1f'; // Unit Separator
 const String ES = '\x1b'; // ESC Separator (nommage firmware, pas le caractère ASCII "ES" standard)
@@ -3755,6 +3755,20 @@ class _HomeScreenState extends State<HomeScreen> {
     final multiMod = combined.length > 1;
     final forcage  = sel?.module.forcage
         ?? (!multiMod && combined.isNotEmpty ? combined.first.forcage : 0);
+    // Visibilité du bloc Forçage en monopage : on combine des modules venant
+    // potentiellement de plusieurs ESP, donc on se base sur l'ESP concerné par
+    // la sélection courante (ou le seul module actionnable s'il n'y en a qu'un) ;
+    // sans ESP ayant "Forçage disponible" du tout, le bloc disparaît toujours.
+    final anyForcageDisponible = _espConfigs.isEmpty ||
+        _espConfigs.any((c) => c.forcageDisponible);
+    int? selEspIdx = sel?.espIdx;
+    selEspIdx ??= (!multiMod && combined.isNotEmpty)
+        ? combined.first.numAction ~/ 1000
+        : null;
+    final forcageAllowedForSelection = selEspIdx == null ||
+        selEspIdx >= _espConfigs.length ||
+        _espConfigs[selEspIdx].forcageDisponible;
+    final forceBlockVisible = anyForcageDisponible && forcageAllowedForSelection;
     final statusOk = _espStates.any((s) => s.ok);
     final statusTxt = statusOk
         ? 'màj ${TimeOfDay.now().format(context)}'
@@ -3871,8 +3885,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         phaseMode: _espConfigs.isNotEmpty ? _espConfigs.first.phaseMode : 'mono'),
                   ]),
                 ),
-                const SizedBox(height: 12),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: forceW),
+                if (forceBlockVisible) ...[
+                  const SizedBox(height: 12),
+                  Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: forceW),
+                ],
                 if (_solarTabEnabled) ...[
                   const SizedBox(height: 12),
                   Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -3928,8 +3944,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       ? _buildCombinedPowerCards()
                       : _buildPowerCards(_espStates.isNotEmpty ? _espStates.first : EspState(),
                       phaseMode: _espConfigs.isNotEmpty ? _espConfigs.first.phaseMode : 'mono'),
-                  const SizedBox(height: 12),
-                  forceW,
+                  if (forceBlockVisible) ...[
+                    const SizedBox(height: 12),
+                    forceW,
+                  ],
                   if (_solarTabEnabled) ...[
                     const SizedBox(height: 12),
                     _buildSolarSummaryBlock(),
