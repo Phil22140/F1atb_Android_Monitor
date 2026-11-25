@@ -96,6 +96,8 @@ v4.15.0 - fix hauteur bande horaire météo (irradiance coupée) + option Força
 
 v4.15.1 - fix option Forçage disponible par ESP
 
+v4.16.0 - couleurs Tempo en ligne (aujourd'hui + demain) en complément du routeur
+
 --------
 
 
