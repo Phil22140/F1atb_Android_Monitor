@@ -43,7 +43,7 @@ void main() {
 
 // ── Séparateurs ASCII (identiques au firmware F1ATB) ──────────────────────────
 const String GS = '\x1d'; // Group Separator
-const String appVersion = '4.15.1';
+const String appVersion = '4.16.0';
 const String RS = '\x1e'; // Record Separator
 const String US = '\x1f'; // Unit Separator
 const String ES = '\x1b'; // ESC Separator (nommage firmware, pas le caractère ASCII "ES" standard)
@@ -245,6 +245,118 @@ String parseTempoJ1(String body) {
   return '';
 }
 
+// ── Tempo en ligne (couleur du jour / lendemain, relais du signal RTE) ────────
+// Complète la couleur lue sur le routeur : l'ESP interroge RTE à heure fixe et
+// peut rater la publication du lendemain (~10h30). Sources sans clé ni compte :
+//   1. Jour Tempo      https://jourtempo.fr/api/v1/tempo.json
+//   2. Calendrier Tempo https://www.calendrier-tempo.fr/api/today | /api/tomorrow
+// Les noms de champs sont tolérés en plusieurs variantes (format non garanti).
+
+/// Normalise une couleur Tempo en 'BLEU' / 'BLANC' / 'ROUGE' ('' si inconnue,
+/// ex. "inconnu" avant l'annonce de RTE). Accepte une chaîne ou un objet
+/// {code|couleur|color: ...}.
+String normalizeTempoColor(dynamic v) {
+  if (v is Map) v = v['code'] ?? v['couleur'] ?? v['color'];
+  if (v is! String) return '';
+  final s = v.toLowerCase();
+  if (s.contains('bleu') || s.contains('blue')) return 'BLEU';
+  if (s.contains('blanc') || s.contains('white')) return 'BLANC';
+  if (s.contains('rouge') || s.contains('red')) return 'ROUGE';
+  return '';
+}
+
+({String today, String tomorrow}) parseJourTempo(Map<String, dynamic> j) {
+  Map<String, dynamic> m = j;
+  final inner = j['tempo'];
+  if (inner is Map<String, dynamic>) m = inner;
+  String pick(List<String> keys) {
+    for (final k in keys) {
+      final c = normalizeTempoColor(m[k]);
+      if (c.isNotEmpty) return c;
+    }
+    return '';
+  }
+  return (
+  today: pick(const ['aujourdhui', 'aujourd_hui', "aujourd'hui", 'today', 'jour']),
+  tomorrow: pick(const ['demain', 'tomorrow', 'j1']),
+  );
+}
+
+/// Clé du "jour Tempo" : il bascule à 6h00 (pas à minuit).
+String tempoDayKey(DateTime d) {
+  final x = d.subtract(const Duration(hours: 6));
+  return '${x.year}-${x.month}-${x.day}';
+}
+
+class TempoOnlineClient {
+  static Future<dynamic> _getJson(String url) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final req = await client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      req.headers.set('Accept', 'application/json');
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200) throw HttpException('HTTP ${resp.statusCode}');
+      final body = await resp.transform(utf8.decoder).join();
+      return jsonDecode(body);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Lève une exception si aucune source n'a répondu. Un "demain" vide est un
+  /// résultat valide (couleur pas encore annoncée), pas une erreur.
+  static Future<({String today, String tomorrow})> fetch() async {
+    Object? lastErr;
+    // Source 1 : Jour Tempo
+    try {
+      final j = await _getJson('https://jourtempo.fr/api/v1/tempo.json');
+      if (j is Map<String, dynamic>) {
+        final r = parseJourTempo(j);
+        if (r.today.isNotEmpty && r.tomorrow.isNotEmpty) return r;
+        if (r.today.isNotEmpty || r.tomorrow.isNotEmpty) {
+          // Une seule couleur reconnue : demain pas encore annoncé, ou champ
+          // non reconnu → on tente la 2e source pour la couleur manquante.
+          var today = r.today, tomorrow = r.tomorrow;
+          try {
+            if (tomorrow.isEmpty) {
+              final d = await _getJson('https://www.calendrier-tempo.fr/api/tomorrow');
+              if (d is Map && d['status'] == 'ok') tomorrow = normalizeTempoColor(d['couleur']);
+            }
+            if (today.isEmpty) {
+              final t = await _getJson('https://www.calendrier-tempo.fr/api/today');
+              if (t is Map && t['status'] == 'ok') today = normalizeTempoColor(t['couleur']);
+            }
+          } catch (_) {}
+          return (today: today, tomorrow: tomorrow);
+        }
+        lastErr = 'réponse sans couleur reconnue';
+      } else {
+        lastErr = 'format inattendu';
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+    // Source 2 (secours) : Calendrier Tempo
+    try {
+      final t = await _getJson('https://www.calendrier-tempo.fr/api/today');
+      final today = (t is Map && t['status'] == 'ok')
+          ? normalizeTempoColor(t['couleur']) : '';
+      var tomorrow = '';
+      try {
+        final d = await _getJson('https://www.calendrier-tempo.fr/api/tomorrow');
+        if (d is Map && d['status'] == 'ok') tomorrow = normalizeTempoColor(d['couleur']);
+      } catch (_) {}
+      if (today.isNotEmpty || tomorrow.isNotEmpty) {
+        return (today: today, tomorrow: tomorrow);
+      }
+      lastErr = 'réponse sans couleur reconnue';
+    } catch (e) {
+      lastErr = e;
+    }
+    throw Exception('Tempo en ligne indisponible : $lastErr');
+  }
+}
+
 // ── Parsing des températures (G0[5] de /ajax_data) ────────────────────────────
 // Format: "2.02|1.96|1.96|1.98|" — capteur absent = -127.00
 List<double?> parseTemperatures(String body) {
@@ -401,6 +513,7 @@ class SolarConfig {
   final double? meteoLat, meteoLon;
   final String meteoLocationName; // nom affiché (ville géocodée, ou "coordonnées perso")
   final bool meteoIconsAnimated; // true=fill animé (Lottie), false=monochrome teinté
+  final bool tempoOnline; // true=complète la couleur Tempo du routeur via un service en ligne (relais RTE)
   final bool apEmaEnabled;
   final String apEmaAppId, apEmaAppSecret, apEmaSid;
   final bool apEcuEnabled;
@@ -432,6 +545,7 @@ class SolarConfig {
     this.meteoLon,
     this.meteoLocationName = '',
     this.meteoIconsAnimated = true,
+    this.tempoOnline = true,
     this.apEmaEnabled = false,
     this.apEmaAppId = '',
     this.apEmaAppSecret = '',
@@ -449,7 +563,7 @@ class SolarConfig {
     bool? hoymilesEnabled, String? hoymilesUsername, String? hoymilesPassword,
     bool? openDtuEnabled, String? openDtuMode, String? openDtuDirectUrl, String? openDtuRouterEspName,
     bool? meteoEnabled, double? meteoLat, double? meteoLon, String? meteoLocationName,
-    bool? meteoIconsAnimated,
+    bool? meteoIconsAnimated, bool? tempoOnline,
     bool? apEmaEnabled, String? apEmaAppId, String? apEmaAppSecret, String? apEmaSid,
     bool? apEcuEnabled, String? apEcuIp,
     double? totalCapacityW,
@@ -480,6 +594,7 @@ class SolarConfig {
       meteoLon: meteoLon ?? this.meteoLon,
       meteoLocationName: meteoLocationName ?? this.meteoLocationName,
       meteoIconsAnimated: meteoIconsAnimated ?? this.meteoIconsAnimated,
+      tempoOnline: tempoOnline ?? this.tempoOnline,
       apEmaEnabled: apEmaEnabled ?? this.apEmaEnabled,
       apEmaAppId: apEmaAppId ?? this.apEmaAppId,
       apEmaAppSecret: apEmaAppSecret ?? this.apEmaAppSecret,
@@ -516,6 +631,7 @@ class SolarConfig {
     'meteo_lon': meteoLon,
     'meteo_location_name': meteoLocationName,
     'meteo_icons_animated': meteoIconsAnimated,
+    'tempo_online': tempoOnline,
     'apema_enabled': apEmaEnabled,
     'apema_app_id': apEmaAppId,
     'apema_app_secret': apEmaAppSecret,
@@ -551,6 +667,7 @@ class SolarConfig {
     meteoLon: (j['meteo_lon'] as num?)?.toDouble(),
     meteoLocationName: j['meteo_location_name'] as String? ?? '',
     meteoIconsAnimated: j['meteo_icons_animated'] as bool? ?? true,
+    tempoOnline: j['tempo_online'] as bool? ?? true,
     apEmaEnabled: j['apema_enabled'] as bool? ?? false,
     apEmaAppId: j['apema_app_id'] as String? ?? '',
     apEmaAppSecret: j['apema_app_secret'] as String? ?? '',
@@ -2181,6 +2298,7 @@ class EspState {
   final String nomPneg;
   final String tempoJour; // 'BLEU', 'BLANC', 'ROUGE', '' si absent
   final String tempoJ1;   // idem pour J+1
+  final bool? tempoRteOn; // case "Affichage couleur Tempo RTE" cochée dans le routeur (null=inconnu)
   final bool ok;
   final String statusTxt;
   final String? routerVersion;
@@ -2213,6 +2331,7 @@ class EspState {
     this.nomPneg = 'Injecté',
     this.tempoJour = '',
     this.tempoJ1 = '',
+    this.tempoRteOn,
     this.ok = false,
     this.statusTxt = 'connexion…',
     this.routerVersion,
@@ -2248,6 +2367,7 @@ class EspState {
     String? nomPneg,
     String? tempoJour,
     String? tempoJ1,
+    bool? tempoRteOn,
     bool? ok,
     String? statusTxt,
     String? routerVersion,
@@ -2280,6 +2400,7 @@ class EspState {
       nomPneg: nomPneg ?? this.nomPneg,
       tempoJour: tempoJour ?? this.tempoJour,
       tempoJ1: tempoJ1 ?? this.tempoJ1,
+      tempoRteOn: tempoRteOn ?? this.tempoRteOn,
       ok: ok ?? this.ok,
       statusTxt: statusTxt ?? this.statusTxt,
       routerVersion: routerVersion ?? this.routerVersion,
@@ -2328,6 +2449,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _izyLiveModeTimer;
   Timer? _capteursInfoTimer; // ré-essai périodique (infos fixes : version routeur, noms sondes)
   Timer? _dailyPeaksTimer; // pics de puissance du jour — payload lourd (600pts), refresh peu fréquent
+  Timer? _tempoOnlineTimer; // vérifie régulièrement s'il faut rafraîchir le Tempo en ligne
+  String _tempoOnlineToday = '';     // 'BLEU'/'BLANC'/'ROUGE' ou '' si inconnu
+  String _tempoOnlineTomorrow = '';  // '' tant que RTE n'a pas annoncé (≈10h30)
+  DateTime? _tempoOnlineLastAttempt;
+  bool _tempoOnlineLastOk = true;
+  String _tempoOnlineDayKey = ''; // jour Tempo (bascule 6h) du dernier relevé réussi
 
   @override
   void initState() {
@@ -2343,6 +2470,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _izyLiveModeTimer?.cancel();
     _capteursInfoTimer?.cancel();
     _dailyPeaksTimer?.cancel();
+    _tempoOnlineTimer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
@@ -2937,6 +3065,13 @@ class _HomeScreenState extends State<HomeScreen> {
     _izyLiveModeTimer?.cancel();
     _capteursInfoTimer?.cancel();
     _dailyPeaksTimer?.cancel();
+    _tempoOnlineTimer?.cancel();
+
+    // Tempo en ligne : le rythme réel est géré dans _fetchTempoOnline (cadence
+    // selon qu'on attend ou non l'annonce du lendemain) ; ce timer sert juste
+    // de réveil, et le premier appel est immédiat.
+    _fetchTempoOnline();
+    _tempoOnlineTimer = Timer.periodic(const Duration(minutes: 2), (_) => _fetchTempoOnline());
 
     // Infos fixes (version routeur, noms de sondes) — premier essai immédiat,
     // peu importe la page affichée au (re)démarrage du polling (avant ce
@@ -3010,6 +3145,45 @@ class _HomeScreenState extends State<HomeScreen> {
     ]);
   }
 
+  // Tempo en ligne : aujourd'hui + demain, complément de la couleur du routeur.
+  // Cadence : 1 min après un échec ou un changement de jour Tempo (6h), 10 min
+  // tant que demain est inconnu (annonce RTE ≈10h30), 30 min ensuite — dans
+  // les limites conseillées par le service (≥10 min, idéalement 30 min).
+  Future<void> _fetchTempoOnline() async {
+    if (!_solarConfig.tempoOnline) {
+      _tempoOnlineLastAttempt = null; // réactivation → relevé immédiat
+      if ((_tempoOnlineToday.isNotEmpty || _tempoOnlineTomorrow.isNotEmpty) && mounted) {
+        setState(() { _tempoOnlineToday = ''; _tempoOnlineTomorrow = ''; });
+      }
+      return;
+    }
+    // Aucun routeur avec Tempo activé → aucun appel réseau.
+    if (!_espStates.any(_tempoRouterEnabled)) return;
+    final now  = DateTime.now();
+    final last = _tempoOnlineLastAttempt;
+    if (last != null) {
+      final dayChanged = _tempoOnlineDayKey != tempoDayKey(now);
+      final minGap = (!_tempoOnlineLastOk || dayChanged)
+          ? const Duration(minutes: 1)
+          : (_tempoOnlineTomorrow.isEmpty
+          ? const Duration(minutes: 10)
+          : const Duration(minutes: 30));
+      if (now.difference(last) < minGap) return;
+    }
+    _tempoOnlineLastAttempt = now;
+    try {
+      final r = await TempoOnlineClient.fetch();
+      _tempoOnlineLastOk  = true;
+      _tempoOnlineDayKey  = tempoDayKey(now);
+      if (mounted) setState(() {
+        _tempoOnlineToday    = r.today;
+        _tempoOnlineTomorrow = r.tomorrow;
+      });
+    } catch (_) {
+      _tempoOnlineLastOk = false; // on garde les dernières valeurs connues
+    }
+  }
+
   Future<void> _fetchCapteursInfo(int idx) async {
     if (idx >= _espConfigs.length) return;
     final cfg = _espConfigs[idx];
@@ -3025,8 +3199,14 @@ class _HomeScreenState extends State<HomeScreen> {
       String nomSonde2 = '';
       String nomPpos   = 'Soutiré';
       String nomPneg   = 'Injecté';
+      bool? tempoRteOn;
       try {
         final data = jsonDecode(body) as Map<String, dynamic>;
+        // Case "Affichage couleur Tempo RTE" du routeur (clé TempoRTEon, 1/0)
+        if (data.containsKey('TempoRTEon')) {
+          final t = data['TempoRTEon'];
+          tempoRteOn = t == 1 || t == true || t == '1';
+        }
         final rawVer = data['VersionStocke'];
         final v = int.tryParse(rawVer?.toString() ?? '');
         if (v != null) {
@@ -3055,8 +3235,12 @@ class _HomeScreenState extends State<HomeScreen> {
           nomSonde2: nomSonde2,
           nomPpos: nomPpos,
           nomPneg: nomPneg,
+          tempoRteOn: tempoRteOn,
         );
       });
+      // Maintenant qu'on sait si le routeur a Tempo activé : relevé en ligne
+      // immédiat plutôt que d'attendre le prochain passage du timer.
+      if (tempoRteOn == true) _fetchTempoOnline();
     } catch (e) {
       if (mounted) setState(() {
         _espStates[idx] = _espStates[idx].copyWith(
@@ -3332,33 +3516,54 @@ class _HomeScreenState extends State<HomeScreen> {
     return '';
   }
 
-  Widget _buildTempoBadge(String t, String label) {
+  // [emptyText] : texte affiché quand la couleur n'est pas (encore) connue —
+  // tuile neutre "vierge", comme sur le site EDF ("Couleur à venir").
+  Widget _buildTempoBadge(String t, String label, {String emptyText = ''}) {
+    final known = _tempoLabel(t).isNotEmpty;
     final c = _tempoColor(t);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: c.withOpacity(0.15),
-        border: Border.all(color: c.withOpacity(0.6)),
+        color: known ? c.withOpacity(0.15) : Colors.transparent,
+        border: Border.all(
+            color: known ? c.withOpacity(0.6) : Colors.white.withOpacity(0.15)),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Text(label, style: TextStyle(fontSize: 9, color: appLabelColor)),
         const SizedBox(height: 2),
-        Text(_tempoLabel(t),
-            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: c)),
+        Text(known ? _tempoLabel(t) : emptyText,
+            maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 11, fontWeight: known ? FontWeight.w600 : FontWeight.w400,
+                color: known ? c : appLabelColor)),
       ]),
     );
   }
 
-  // Bandeau Tempo : J et J+1 — affiché seulement si tempoJour non vide
+  // Couleur effective : celle du routeur en priorité, sinon celle du service en
+  // ligne (si l'option "Tempo en ligne" est active).
+  // Le complément en ligne ne concerne que les routeurs où Tempo est activé
+  // (case "Affichage couleur Tempo RTE", ou couleur déjà fournie par le Linky) :
+  // sans Tempo sur le routeur, rien ne s'affiche, comme avant.
+  bool _tempoRouterEnabled(EspState s) =>
+      s.tempoRteOn == true || s.tempoJour.isNotEmpty || s.tempoJ1.isNotEmpty;
+  bool _tempoOnlineApplies(EspState s) =>
+      _solarConfig.tempoOnline && _tempoRouterEnabled(s);
+  String _tempoToday(EspState s) => s.tempoJour.isNotEmpty
+      ? s.tempoJour : (_tempoOnlineApplies(s) ? _tempoOnlineToday : '');
+  String _tempoTomorrow(EspState s) => s.tempoJ1.isNotEmpty
+      ? s.tempoJ1 : (_tempoOnlineApplies(s) ? _tempoOnlineTomorrow : '');
+  bool _tempoVisible(EspState s) =>
+      _tempoToday(s).isNotEmpty || _tempoTomorrow(s).isNotEmpty;
+
+  // Bandeau Tempo : J et J+1 — affiché dès qu'une des deux couleurs est connue.
+  // Demain pas encore annoncé → tuile vierge "Couleur à venir".
   Widget _buildTempoWidget(EspState state) {
-    if (state.tempoJour.isEmpty) return const SizedBox.shrink();
+    if (!_tempoVisible(state)) return const SizedBox.shrink();
     return Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-      Expanded(child: _buildTempoBadge(state.tempoJour, 'Aujourd\'hui')),
-      if (state.tempoJ1.isNotEmpty) ...[
-        const SizedBox(width: 8),
-        Expanded(child: _buildTempoBadge(state.tempoJ1, 'Demain')),
-      ],
+      Expanded(child: _buildTempoBadge(_tempoToday(state), 'Aujourd\'hui', emptyText: '—')),
+      const SizedBox(width: 8),
+      Expanded(child: _buildTempoBadge(_tempoTomorrow(state), 'Demain', emptyText: 'Couleur à venir')),
     ]);
   }
 
@@ -3875,7 +4080,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    if (_espStates.isNotEmpty && _espStates.first.tempoJour.isNotEmpty) ...[
+                    if (_espStates.isNotEmpty && _tempoVisible(_espStates.first)) ...[
                       _buildTempoWidget(_espStates.first),
                       const SizedBox(height: 6),
                     ],
@@ -3936,7 +4141,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   _buildCombinedTemperatures(),
                   const SizedBox(height: 8),
-                  if (_espStates.isNotEmpty && _espStates.first.tempoJour.isNotEmpty) ...[
+                  if (_espStates.isNotEmpty && _tempoVisible(_espStates.first)) ...[
                     _buildTempoWidget(_espStates.first),
                     const SizedBox(height: 6),
                   ],
@@ -5144,7 +5349,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    if (state.tempoJour.isNotEmpty) ...[
+                    if (_tempoVisible(state)) ...[
                       _buildTempoWidget(state),
                       const SizedBox(height: 6),
                     ],
@@ -5226,7 +5431,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         temperatures: state.temperatures),
                     const SizedBox(height: 10),
                   ],
-                  if (state.tempoJour.isNotEmpty) ...[
+                  if (_tempoVisible(state)) ...[
                     _buildTempoWidget(state),
                     const SizedBox(height: 6),
                   ],
@@ -6050,6 +6255,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
   late TextEditingController _meteoCityCtrl, _meteoLatCtrl, _meteoLonCtrl;
   late String _meteoLocationName;
   late bool _meteoIconsAnimated;
+  late bool _tempoOnline;
   bool _meteoSearching = false;
   String? _meteoSearchError;
   List<OpenMeteoGeocodingResult>? _meteoResults;
@@ -6129,7 +6335,8 @@ class _ConfigSheetState extends State<ConfigSheet> {
     _meteoEnabled     = sc.meteoEnabled;
     _meteoLocationName = sc.meteoLocationName;
     _meteoIconsAnimated = sc.meteoIconsAnimated;
-    _meteoCityCtrl    = TextEditingController();
+    _tempoOnline      = sc.tempoOnline;
+    _meteoCityCtrl   = TextEditingController();
     _meteoLatCtrl     = TextEditingController(text: sc.meteoLat?.toString() ?? '');
     _meteoLonCtrl     = TextEditingController(text: sc.meteoLon?.toString() ?? '');
     _apEmaEnabled     = sc.apEmaEnabled;
@@ -7971,6 +8178,46 @@ class _ConfigSheetState extends State<ConfigSheet> {
               const SizedBox(height: 8),
             ],
 
+            // ── Tempo en ligne (couleur du jour / lendemain) ──────────────────
+            Text('Couleurs Tempo',
+                style: TextStyle(fontSize: 12, color: appLabelColor)),
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF0A0F1A),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withOpacity(0.08)),
+              ),
+              child: Row(children: [
+                for (final opt in const [(true, 'Routeur + en ligne'), (false, 'Routeur seul')])
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() => _tempoOnline = opt.$1),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          color: _tempoOnline == opt.$1
+                              ? const Color(0xFFF97316) : Colors.transparent,
+                          borderRadius: BorderRadius.circular(11),
+                        ),
+                        child: Text(opt.$2, textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                color: _tempoOnline == opt.$1 ? Colors.white : appLabelColor)),
+                      ),
+                    ),
+                  ),
+              ]),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _tempoOnline
+                  ? 'Si « Affichage couleur Tempo RTE » est coché dans le routeur : complète la couleur manquante (aujourd\'hui / demain) via un service en ligne relayant RTE — utile si le routeur rate l\'annonce de 10h30'
+                  : 'Seule la couleur lue sur le routeur est affichée',
+              style: TextStyle(fontSize: 10, color: appLabelColor),
+            ),
+            const SizedBox(height: 16),
+
             // ── Orientation ──────────────────────────────────────────────────
             Text('Orientation',
                 style: TextStyle(fontSize: 12, color: appLabelColor)),
@@ -8062,6 +8309,7 @@ class _ConfigSheetState extends State<ConfigSheet> {
                     meteoLon: double.tryParse(_meteoLonCtrl.text.trim().replaceAll(',', '.')),
                     meteoLocationName: _meteoLocationName,
                     meteoIconsAnimated: _meteoIconsAnimated,
+                    tempoOnline: _tempoOnline,
                     apEmaEnabled: _apEmaEnabled,
                     apEmaAppId: _apEmaAppIdCtrl.text.trim(),
                     apEmaAppSecret: _apEmaAppSecretCtrl.text.trim(),
